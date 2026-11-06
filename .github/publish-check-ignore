@@ -1,0 +1,13 @@
+# Reviewed publish-check hits (go-public publish-check.py).
+# Recorded benchmark runs with sanitized paths (C:\Users\user\...), used by test_benchmark_metrics.
+allow:C:\\Users\\user\\Documents\\Research\\research_mcp
+# Placeholder home paths in tests.
+allow:C:\Users\someone
+allow:/mnt/c/Users/x
+allow:/Users/x/
+# lxml attribute access (QName(node).localname), not hostnames.
+allow:node.local
+allow:item.local
+allow:child.local
+allow:old.local
+allow:threading.local

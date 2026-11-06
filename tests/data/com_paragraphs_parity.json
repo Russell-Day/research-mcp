@@ -1,0 +1,500 @@
+[
+ {
+  "i": 1,
+  "text": "A Synthetic Paragraph Parity Fixture",
+  "style": "Title",
+  "in_table": false
+ },
+ {
+  "i": 2,
+  "text": "",
+  "style": "Normal",
+  "in_table": false
+ },
+ {
+  "i": 3,
+  "text": "1. Introduction",
+  "style": "Heading 1",
+  "in_table": false
+ },
+ {
+  "i": 4,
+  "text": "Short sentences stand in for prose (1) and continue after the citation.",
+  "style": "Normal",
+  "in_table": false
+ },
+ {
+  "i": 5,
+  "text": "Two sources agree (2,3), and a third disagrees (4).",
+  "style": "Normal",
+  "in_table": false
+ },
+ {
+  "i": 6,
+  "text": "This sentence carries a reviewer comment.",
+  "style": "Normal",
+  "in_table": false
+ },
+ {
+  "i": 7,
+  "text": "First line\u000bsecond line of the same paragraph.",
+  "style": "Normal",
+  "in_table": false
+ },
+ {
+  "i": 8,
+  "text": "",
+  "style": "Normal",
+  "in_table": false
+ },
+ {
+  "i": 9,
+  "text": "1.1 Measurements",
+  "style": "Heading 2",
+  "in_table": false
+ },
+ {
+  "i": 10,
+  "text": "Table 1 lists the measured values.",
+  "style": "Normal",
+  "in_table": false
+ },
+ {
+  "i": 11,
+  "text": "Group",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 12,
+  "text": "Runs",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 13,
+  "text": "Mean",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 14,
+  "text": "",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 15,
+  "text": "Alpha",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 16,
+  "text": "3",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 17,
+  "text": "0.91",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 18,
+  "text": "",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 19,
+  "text": "",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 20,
+  "text": "4",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 21,
+  "text": "0.88 ",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 22,
+  "text": "(rerun)",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 23,
+  "text": "",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 24,
+  "text": "Beta",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 25,
+  "text": "",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 26,
+  "text": "0.79 (5)",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 27,
+  "text": "",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 28,
+  "text": "Gamma",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 29,
+  "text": "2",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 30,
+  "text": "0.85",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 31,
+  "text": "",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 32,
+  "text": "Values are means over the runs.",
+  "style": "Normal",
+  "in_table": false
+ },
+ {
+  "i": 33,
+  "text": "\f",
+  "style": "Normal",
+  "in_table": false
+ },
+ {
+  "i": 34,
+  "text": "1.2 Groups",
+  "style": "Heading 2",
+  "in_table": false
+ },
+ {
+  "i": 35,
+  "text": "Both groups",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 36,
+  "text": "",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 37,
+  "text": "Early",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 38,
+  "text": "12",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 39,
+  "text": "",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 40,
+  "text": "Late",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 41,
+  "text": "9",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 42,
+  "text": "",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 43,
+  "text": "",
+  "style": "Normal",
+  "in_table": false
+ },
+ {
+  "i": 44,
+  "text": "1.2.1 Nested layout",
+  "style": "Heading 3",
+  "in_table": false
+ },
+ {
+  "i": 45,
+  "text": "Outer left",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 46,
+  "text": "a1",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 47,
+  "text": "b1",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 48,
+  "text": "",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 49,
+  "text": "a2",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 50,
+  "text": "b2",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 51,
+  "text": "",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 52,
+  "text": "Below the inner table",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 53,
+  "text": "",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 54,
+  "text": "Outer bottom",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 55,
+  "text": "",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 56,
+  "text": "",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 57,
+  "text": "Label\tValue",
+  "style": "Normal",
+  "in_table": false
+ },
+ {
+  "i": 58,
+  "text": "\tIndented by a tab character.",
+  "style": "Normal",
+  "in_table": false
+ },
+ {
+  "i": 59,
+  "text": "/",
+  "style": "Normal",
+  "in_table": false
+ },
+ {
+  "i": 60,
+  "text": "Figure 1. A single-pixel image.",
+  "style": "Normal",
+  "in_table": false
+ },
+ {
+  "i": 61,
+  "text": "An anchored image sits beside this text.",
+  "style": "Normal",
+  "in_table": false
+ },
+ {
+  "i": 62,
+  "text": "\f",
+  "style": "Normal",
+  "in_table": false
+ },
+ {
+  "i": 63,
+  "text": "2. Results",
+  "style": "Heading 1",
+  "in_table": false
+ },
+ {
+  "i": 64,
+  "text": "Measure",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 65,
+  "text": "Value",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 66,
+  "text": "",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 67,
+  "text": "Precision",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 68,
+  "text": "0.90",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 69,
+  "text": "",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 70,
+  "text": "Recall",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 71,
+  "text": "0.86",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 72,
+  "text": "",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 73,
+  "text": "F1",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 74,
+  "text": "0.88",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 75,
+  "text": "",
+  "style": "Normal",
+  "in_table": true
+ },
+ {
+  "i": 76,
+  "text": "The results end here.",
+  "style": "Normal",
+  "in_table": false
+ },
+ {
+  "i": 77,
+  "text": "",
+  "style": "Normal",
+  "in_table": false
+ },
+ {
+  "i": 78,
+  "text": "References",
+  "style": "Heading 1",
+  "in_table": false
+ },
+ {
+  "i": 79,
+  "text": "1.\tAdams A, Baker B. A first made-up reference. J Synth Stud. 2020;1:1-10.",
+  "style": "Bibliography",
+  "in_table": false
+ },
+ {
+  "i": 80,
+  "text": "2.\tChen C. A second made-up reference. Synth Methods. 2021;2:11-20.",
+  "style": "Bibliography",
+  "in_table": false
+ },
+ {
+  "i": 81,
+  "text": "3.\tDiaz D, Evans E, Fox F. A third made-up reference. Synth Rev. 2022;3:21-30.",
+  "style": "Bibliography",
+  "in_table": false
+ },
+ {
+  "i": 82,
+  "text": "4.\tGarcia G. A fourth made-up reference. Synth Lett. 2023;4:31-40.",
+  "style": "Bibliography",
+  "in_table": false
+ },
+ {
+  "i": 83,
+  "text": "",
+  "style": "Normal",
+  "in_table": false
+ }
+]

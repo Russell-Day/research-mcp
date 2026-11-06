@@ -1,0 +1,65 @@
+{
+  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
+  "manifest_version": "0.4",
+  "name": "research-mcp",
+  "display_name": "Research MCP (Word + Zotero)",
+  "version": "0.0.0",
+  "description": "Edit Microsoft Word documents safely and cite from Zotero. Needs Windows, Word and the Zotero desktop app.",
+  "long_description": "Read, edit, comment on and restyle .docx files without breaking them: every write is pinned to the version that was read, verified before it is saved, and can be undone in one call. Citations are live Zotero fields inserted and refreshed through your Zotero desktop library. Requires Windows, the desktop Microsoft Word and Zotero 7 with 'Allow other applications on this computer to communicate with Zotero' turned on (Edit > Settings > Advanced).",
+  "author": {
+    "name": "research-mcp contributors",
+    "url": "https://github.com/Russell-Day/research-mcp"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Russell-Day/research-mcp"
+  },
+  "homepage": "https://github.com/Russell-Day/research-mcp",
+  "documentation": "https://github.com/Russell-Day/research-mcp#readme",
+  "support": "https://github.com/Russell-Day/research-mcp/issues",
+  "license": "MIT",
+  "keywords": ["word", "docx", "zotero", "citations", "research", "writing"],
+  "server": {
+    "type": "uv",
+    "entry_point": "src/research_mcp/__main__.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["run", "--directory", "${__dirname}", "--no-dev", "research-mcp", "serve"],
+      "env": {
+        "ZOTERO_API_KEY": "${user_config.zotero_api_key}",
+        "ZOTERO_LIBRARY_ID": "${user_config.zotero_library_id}",
+        "RESEARCH_MCP_AUTHOR": "${user_config.comment_author}"
+      }
+    }
+  },
+  "compatibility": {
+    "platforms": ["win32"],
+    "runtimes": {
+      "python": ">=3.12,<3.15"
+    }
+  },
+  "user_config": {
+    "zotero_api_key": {
+      "type": "string",
+      "title": "Zotero write key (optional)",
+      "description": "Only needed to add references by DOI or fix a reference's details. Create one at https://www.zotero.org/settings/keys with library and write access. Leave empty to only search and cite.",
+      "required": false,
+      "sensitive": true,
+      "default": ""
+    },
+    "zotero_library_id": {
+      "type": "string",
+      "title": "Zotero user ID (with the key)",
+      "description": "The number shown as 'Your user ID for use in API calls' on https://www.zotero.org/settings/keys.",
+      "required": false,
+      "default": ""
+    },
+    "comment_author": {
+      "type": "string",
+      "title": "Comment author name (optional)",
+      "description": "Name shown on Word comments the assistant adds. Leave empty to use the user name set in Word.",
+      "required": false,
+      "default": ""
+    }
+  }
+}

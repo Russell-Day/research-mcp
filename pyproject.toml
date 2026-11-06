@@ -1,0 +1,67 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "research-mcp"
+dynamic = ["version"]
+description = "MCP server for editing Microsoft Word documents safely and citing from Zotero (Windows)"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "research-mcp contributors" }]
+requires-python = ">=3.12,<3.15"
+keywords = ["mcp", "microsoft-word", "zotero", "citations", "docx", "claude"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Science/Research",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Office/Business :: Office Suites",
+  "Topic :: Text Processing",
+]
+dependencies = [
+  "mcp==2.0.0",
+  "pydantic>=2.12,<3",
+  "pywin32>=312; platform_system == 'Windows'",
+  "pyzotero>=1.5,<2",
+]
+
+[project.urls]
+Homepage = "https://github.com/Russell-Day/research-mcp"
+Source = "https://github.com/Russell-Day/research-mcp"
+Issues = "https://github.com/Russell-Day/research-mcp/issues"
+
+[project.scripts]
+rmcp = "research_mcp.cli:main"
+research-mcp = "research_mcp.__main__:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=9,<10",
+  "python-docx>=1.1,<2",
+]
+
+[tool.hatch.version]
+path = "src/research_mcp/__init__.py"
+
+# The wheel is the package directory only (char_map.json and data/*.docx ride along as package data).
+[tool.hatch.build.targets.wheel]
+packages = ["src/research_mcp"]
+
+# The sdist is an allowlist: the package, the public tests, and the project files. Nothing else in the
+# tree (scratch, reference, logs, client configs, private test data) can slip in.
+[tool.hatch.build.targets.sdist]
+only-include = ["src/research_mcp", "tests", "pyproject.toml", "uv.lock", "README.md", "LICENSE"]
+exclude = ["tests/private_data", "tests/test_private_*", "tests/manual_*", "__pycache__", "*.pyc"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "word_live: disposable Microsoft Word COM integration tests (opt in with RESEARCH_MCP_WORD_LIVE=1)",
+  "private_data: needs the author's own documents or Zotero library; not part of the public suite",
+]

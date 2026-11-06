@@ -1,0 +1,327 @@
+[
+  {
+    "id": "audit_document",
+    "description": "Select the document audit endpoint and report structural counts.",
+    "tier": "read_only",
+    "required_tools": [
+      "audit_document"
+    ],
+    "prompt": "Audit the Word document at {fixture}. Report its table count and bookmark count. Do not modify it.",
+    "verifier": {
+      "kind": "tool_result",
+      "tool": "audit_document",
+      "contains": {
+        "table_count": 1
+      }
+    }
+  },
+  {
+    "id": "list_bookmarks",
+    "description": "Inventory a document's bookmarks without mutation.",
+    "tier": "read_only",
+    "required_tools": [
+      "list_bookmarks"
+    ],
+    "prompt": "List the bookmarks in {fixture}. Confirm that the synthetic legacy and legitimate fixture bookmarks are present. Do not modify the document.",
+    "verifier": {
+      "kind": "tool_result",
+      "tool": "list_bookmarks",
+      "strings": [
+        "MCPFixtureLegacy",
+        "_FixtureLegitimate"
+      ]
+    }
+  },
+  {
+    "id": "search_zotero",
+    "description": "Search Zotero and select the expected existing paper.",
+    "tier": "read_only",
+    "required_tools": [
+      "search_zotero"
+    ],
+    "prompt": "Search the local Zotero library for the paper titled Cancer statistics, 2026. Return the matching Zotero item key. Do not modify the library.",
+    "verifier": {
+      "kind": "tool_result",
+      "tool": "search_zotero",
+      "strings": [
+        "6W98BDK7",
+        "Cancer statistics, 2026"
+      ]
+    }
+  },
+  {
+    "id": "clean_bookmarks",
+    "description": "Remove one exact disposable bookmark into a new version.",
+    "tier": "versioned",
+    "required_tools": [
+      "clean_bookmarks"
+    ],
+    "prompt": "Create a new Word version at {output} from {fixture}. Delete only the exact bookmark MCPFixtureLegacy. Preserve _FixtureLegitimate and all document text.",
+    "verifier": {
+      "kind": "bookmark_cleanup",
+      "tool": "clean_bookmarks",
+      "source": "{fixture}",
+      "output": "{output}",
+      "absent": [
+        "MCPFixtureLegacy"
+      ],
+      "present": [
+        "_FixtureLegitimate"
+      ]
+    }
+  },
+  {
+    "id": "format_tables",
+    "description": "Apply the tested journal-neutral policy and constrained merges.",
+    "tier": "versioned",
+    "required_tools": [
+      "format_tables"
+    ],
+    "prompt": "Create a new Word version at {output} from {fixture}. Format table 1 with the journal-neutral policy. Columns 1 and 2 are descriptive. Merge the repeated LoRA label in column 1 across rows 2 through 4, and Full fine-tuning across rows 5 through 7. Do not change cell text.",
+    "verifier": {
+      "kind": "table_format",
+      "tool": "format_tables",
+      "source": "{fixture}",
+      "output": "{output}",
+      "table_specs": [
+        {
+          "index": 1,
+          "descriptive_columns": [
+            1,
+            2
+          ],
+          "merges": [
+            {
+              "column": 1,
+              "start_row": 2,
+              "end_row": 4,
+              "label": "LoRA"
+            },
+            {
+              "column": 1,
+              "start_row": 5,
+              "end_row": 7,
+              "label": "Full fine-tuning"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "id": "insert_zotero_citation_word",
+    "description": "Insert and render one existing Zotero item as a live Word citation.",
+    "tier": "zotero_live",
+    "required_tools": [
+      "insert_zotero_citation"
+    ],
+    "prompt": "Create a new Word version at {output} from {citation_source}. Insert one live Zotero citation for item key 6W98BDK7 in paragraph 1, using anchor \".\" so it lands immediately before the paragraph's final period. Use item donor {item_donor}. Do not add a bibliography and do not overwrite the source.",
+    "verifier": {
+      "kind": "zotero_citation",
+      "tool": "insert_zotero_citation",
+      "output": "{output}",
+      "item_key": "6W98BDK7"
+    }
+  },
+  {
+    "id": "insert_sentence",
+    "description": "Insert one sentence without flattening paragraph formatting.",
+    "tier": "versioned",
+    "required_tools": [
+      "inspect_document",
+      "edit_document"
+    ],
+    "prompt": "Create a new version of {fixture} at {output}. Insert the sentence This sentence was added by the benchmark. after the first sentence while preserving all existing formatting.",
+    "verifier": {
+      "kind": "document_edit",
+      "tool": "edit_document",
+      "source": "{fixture}",
+      "output": "{output}",
+      "expected_text": [
+        "Synthetic table fixture.",
+        "This sentence was added by the benchmark."
+      ],
+      "paragraph_delta": 0,
+      "table_delta": 0
+    }
+  },
+  {
+    "id": "insert_paragraph",
+    "description": "Insert a new body paragraph using the document's existing style.",
+    "tier": "versioned",
+    "required_tools": [
+      "inspect_document",
+      "edit_document"
+    ],
+    "prompt": "Create a new version of {fixture} at {output}. Insert a new Normal-style paragraph after the first paragraph with text Benchmark paragraph added safely. Preserve all other content and formatting.",
+    "verifier": {
+      "kind": "document_edit",
+      "tool": "edit_document",
+      "source": "{fixture}",
+      "output": "{output}",
+      "expected_text": [
+        "Benchmark paragraph added safely."
+      ],
+      "paragraph_delta": 1,
+      "table_delta": 0
+    }
+  },
+  {
+    "id": "edit_sentence",
+    "description": "Replace exact sentence text inside one paragraph.",
+    "tier": "versioned",
+    "required_tools": [
+      "inspect_document",
+      "edit_document"
+    ],
+    "prompt": "Create a new version of {fixture} at {output}. Replace the exact text Synthetic table fixture. with Synthetic benchmark table fixture. exactly once, preserving the paragraph style and surrounding formatting.",
+    "verifier": {
+      "kind": "document_edit",
+      "tool": "edit_document",
+      "source": "{fixture}",
+      "output": "{output}",
+      "expected_text": [
+        "Synthetic benchmark table fixture."
+      ],
+      "absent_text": [
+        "Synthetic table fixture."
+      ],
+      "paragraph_delta": 0,
+      "table_delta": 0
+    }
+  },
+  {
+    "id": "insert_table",
+    "description": "Insert a new table without disturbing existing document structure.",
+    "tier": "versioned",
+    "required_tools": [
+      "inspect_document",
+      "edit_document"
+    ],
+    "prompt": "Create a new version of {fixture} at {output}. Insert a 2-column, 3-row table after the protected prose. Use headers Measure and Value, then rows Accuracy and 0.95, F1 and 0.93. Preserve the existing table.",
+    "verifier": {
+      "kind": "document_edit",
+      "tool": "edit_document",
+      "source": "{fixture}",
+      "output": "{output}",
+      "table_delta": 1,
+      "new_table": [
+        [
+          "Measure",
+          "Value"
+        ],
+        [
+          "Accuracy",
+          "0.95"
+        ],
+        [
+          "F1",
+          "0.93"
+        ]
+      ]
+    }
+  },
+  {
+    "id": "edit_table_cells",
+    "description": "Edit exact table-cell content while preserving table structure.",
+    "tier": "versioned",
+    "required_tools": [
+      "inspect_document",
+      "edit_document"
+    ],
+    "prompt": "Create a new version of {fixture} at {output}. In table 1, change the Accuracy value for the LoRA Early row from 0.90 to 0.905, exactly once. Use inspect_document to find the paragraph index of that cell first. Preserve every other cell, the table structure, and all formatting.",
+    "verifier": {
+      "kind": "document_edit",
+      "tool": "edit_document",
+      "source": "{fixture}",
+      "output": "{output}",
+      "expected_text": [
+        "0.905"
+      ],
+      "absent_text": [
+        "0.90\t"
+      ],
+      "table_delta": 0,
+      "paragraph_delta": 0
+    }
+  },
+  {
+    "id": "reply_to_editorial_comment",
+    "description": "Reply to one editorial comment thread, leaving it open and anchored.",
+    "tier": "versioned",
+    "required_tools": [
+      "inspect_document",
+      "edit_document"
+    ],
+    "prompt": "Create a new Word version at {output} from {comment_source}. Use inspect_document with comments included to find the comment thread authored about the SDs in Table 4, then add one reply to that exact thread saying the difference between the two standard deviations is now clarified. Leave the thread open. Do not change any document text and do not overwrite the source.",
+    "verifier": {
+      "kind": "document_edit",
+      "tool": "edit_document",
+      "source": "{comment_source}",
+      "output": "{output}",
+      "expected_text": [],
+      "absent_text": [],
+      "table_delta": 0,
+      "paragraph_delta": 0,
+      "comment_delta": 1
+    }
+  },
+  {
+    "id": "partial_batch_around_citation",
+    "description": "A batch with one impossible operation publishes only the verified edits.",
+    "tier": "zotero_live",
+    "required_tools": [
+      "inspect_document",
+      "edit_document"
+    ],
+    "prompt": "Create one new Word version at {output} from {citation_source}. In a single edit_document call make three operations in order: replace Disposable with Temporary; replace the text 'text that is absent' with 'never published'; and insert ' verified' after the word source. Report which operations applied. Do not overwrite the source and do not remove the citation.",
+    "verifier": {
+      "kind": "document_edit",
+      "tool": "edit_document",
+      "source": "{citation_source}",
+      "output": "{output}",
+      "expected_text": [
+        "Temporary"
+      ],
+      "absent_text": [
+        "never published"
+      ],
+      "operation_statuses": [
+        "applied",
+        "failed",
+        "applied"
+      ],
+      "table_delta": 0,
+      "paragraph_delta": 0
+    }
+  },
+  {
+    "id": "add_zotero_item_by_doi",
+    "description": "Create or find a Zotero library item from a DOI and verify its returned key.",
+    "tier": "zotero_live",
+    "required_tools": [
+      "add_zotero_item_by_doi"
+    ],
+    "prompt": "Add or find the Zotero item for DOI 10.1038/nature14539. Return its Zotero key and verified DOI without creating a duplicate.",
+    "verifier": {
+      "kind": "tool_result",
+      "tool": "add_zotero_item_by_doi",
+      "contains": {
+        "success": true,
+        "doi": "10.1038/nature14539"
+      }
+    }
+  },
+  {
+    "id": "batch_zotero_citations",
+    "description": "Insert several citation clusters with one output version and refresh.",
+    "tier": "planned",
+    "required_tools": [
+      "insert_zotero_citations"
+    ],
+    "prompt": "Create one new Word version from {citation_source} at {output}. Insert two independently specified live Zotero citation clusters and refresh only once.",
+    "verifier": {
+      "kind": "planned"
+    }
+  }
+]

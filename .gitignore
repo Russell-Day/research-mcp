@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Build output
+dist/
+build/
+*.mcpb
+
+# Local settings and secrets
+.env
+config.env
+
+# Runtime output
+logs/
+tmp/
+scratch/
