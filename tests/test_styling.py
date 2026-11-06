@@ -42,9 +42,13 @@ def test_style_profiles_exist_and_configured():
     assert compact.strip_header_footers is True
 
 
-def test_find_pdftoppm_returns_str_or_none():
-    result = find_pdftoppm()
-    assert result is None or isinstance(result, str)
+def test_find_pdftoppm_returns_a_path_or_refuses_clearly():
+    try:
+        result = find_pdftoppm()
+    except RefusedUnsafe as exc:  # machines without Poppler/MiKTeX (CI)
+        assert "pdftoppm executable not found" in str(exc)
+    else:
+        assert isinstance(result, str) and result
 
 
 def test_apply_journal_style_rejects_unknown_profile(tmp_path):

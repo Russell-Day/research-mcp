@@ -100,7 +100,7 @@ full MCP with write tools is for Business and Enterprise/Edu; Pro gets read/fetc
 | `add_zotero_item_by_doi`, `update_zotero_item` | add a reference by DOI, fix a reference's details (needs a [write key](#zotero-write-key)) |
 | `format_tables`, `clean_bookmarks` | table layout, remove stray bookmarks |
 | `audit_document_style`, `style_text`, `apply_document_style` | check emphasis, bold/italic one phrase, apply a typography preset |
-| `render_document_pages` | page images (PNG) to check layout |
+| `render_document_pages` | page images (PNG) to check layout (needs `pdftoppm` from Poppler or MiKTeX) |
 | `report_issue` | a ready-to-file GitHub issue link |
 
 Every write needs the `sha256` from the last read, so it never edits a version it hasn't seen. A
