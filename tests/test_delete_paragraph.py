@@ -7,6 +7,7 @@ Reject and Accept are checked with the string engine (`resolve_revisions`).
 """
 from __future__ import annotations
 
+import os
 import re
 import zipfile
 from pathlib import Path
@@ -324,7 +325,7 @@ def test_batch_twenty_tracked_deletes_then_a_replace(tmp_path):
                                for i, t in enumerate(before, 1) if i not in empties]
 
 
-@windows_only
+@pytest.mark.skipif(os.environ.get("RESEARCH_MCP_WORD_LIVE") != "1", reason="requires Word (RESEARCH_MCP_WORD_LIVE=1)")
 def test_batch_untracked_later_ops_shifted(tmp_path):
     source = make(tmp_path, "shift", para("", run("One.")) + EMPTY + EMPTY + para("", run("Four.")))
     result = run_batch(source, {"op_id": "d", "type": "delete_paragraph", "paragraph_index": 2,

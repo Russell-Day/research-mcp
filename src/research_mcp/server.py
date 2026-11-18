@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -177,6 +178,16 @@ async def _logged_call_tool(
             name, arguments, context, convert_result=convert_result
         )
         return result
+    except UnexpectedToolError as exc:
+        # mcp >= 2.1 sends the client only "Error executing tool <name>" for an
+        # exception that is not a ToolError. Refusals (RefusedUnsafe and the rest)
+        # are the message the model must read, so the tool's own text is kept.
+        cause = exc.__cause__
+        if cause is None or isinstance(cause, ToolError):
+            error = exc
+            raise
+        error = ToolError(f"Error executing tool {name}: {cause}")
+        raise error from cause
     except Exception as exc:
         error = exc
         raise

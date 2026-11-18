@@ -25,7 +25,7 @@ classifiers = [
   "Topic :: Text Processing",
 ]
 dependencies = [
-  "mcp==2.0.0",
+  "mcp==2.2.0",
   "pydantic>=2.12,<3",
   "pywin32>=312; platform_system == 'Windows'",
   "pyzotero>=1.5,<2",

@@ -212,7 +212,8 @@ def convert_to_docx(source: str | Path, output: str | Path | None = None, *, vis
     src, target = resolve_convert_target(source, output)
     sha_before = file_sha256(src)
     temporary = Path(temporary) if temporary is not None else _temporary_beside(target)
-    if temporary.parent != target.parent or not temporary.name.startswith(TEMP_PREFIX):
+    # resolve(): the caller's path may spell the folder another way (TEMP is often an 8.3 short name, RUNNER~1).
+    if temporary.parent.resolve() != target.parent.resolve() or not temporary.name.startswith(TEMP_PREFIX):
         raise RefusedUnsafe(f"convert_document: the temporary {str(temporary)!r} must be a {TEMP_PREFIX}* file "
                             "in the target folder")
     try:
