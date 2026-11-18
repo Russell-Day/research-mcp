@@ -161,22 +161,57 @@ def test_property_only_replace_goes_direct_xml(property_only, tmp_path, no_word)
     assert result["engine"] == "direct_xml" and raw_revisions(out2) == raw_revisions(property_only)
 
 
-@pytest.mark.parametrize("call", [
-    lambda e, s, o: e.insert_text_to_version(s, o, paragraph_index=1, position="after", anchor="opening",
-                                             text=" new"),
-    lambda e, s, o: e.insert_paragraph_to_version(s, o, after_paragraph_index=1, text="New paragraph."),
-    lambda e, s, o: e.insert_table_to_version(s, o, after_paragraph_index=1, headers=("A", "B"),
-                                              rows=(("1", "2"),), descriptive_columns=(1,)),
-    lambda e, s, o: e.replace_table_row_to_version(s, o, match="Cell B", cells=["Cell added A", "Cell C"]),
-], ids=["insert_text", "insert_paragraph", "insert_table", "replace_table_row"])
-def test_word_ops_refuse_property_only_revisions_before_word(property_only, tmp_path, no_word, call):
+def test_property_only_insert_text_goes_direct_xml(property_only, tmp_path, no_word):
+    """Plan 864: insert_text on a revised document is a plain direct-XML edit, like replace_text."""
+    from research_mcp.editing import insert_text_to_version
+
+    out = tmp_path / "out.docx"
+    result = insert_text_to_version(property_only, out, paragraph_index=1, position="after", anchor="opening",
+                                    text=" new")
+    assert result["engine"] == "direct_xml"
+    assert raw_revisions(out) == raw_revisions(property_only)
+    assert view(paragraphs(out)[0]) == "Plain opening new paragraph with no revisions."
+
+
+def test_property_only_insert_paragraph_goes_direct_xml(property_only, tmp_path, no_word):
+    """Plan 864 S2 (decision 5): insert_paragraph on a revised document, tracking off, inserts plainly by direct
+    XML; every property change stays byte-identical and no revision is added."""
+    from research_mcp.editing import insert_paragraph_to_version
+
+    out = tmp_path / "out.docx"
+    result = insert_paragraph_to_version(property_only, out, after_paragraph_index=1, text="New paragraph.")
+    assert result["engine"] == "direct_xml" and result["index_delta"] == 1
+    assert raw_revisions(out) == raw_revisions(property_only)
+    assert [view(p) for p in paragraphs(out)[:2]] == ["Plain opening paragraph with no revisions.", "New paragraph."]
+
+
+def test_property_only_replace_table_row_goes_direct_xml(property_only, tmp_path, no_word):
+    """Plan 864 S3a (decision 5): replace_table_row on a revised document, tracking off, edits the row plainly
+    by direct XML; every property change (the cell's tcPrChange included) stays byte-identical."""
+    from research_mcp.editing import replace_table_row_to_version
+
+    out = tmp_path / "out.docx"
+    result = replace_table_row_to_version(property_only, out, match="Cell B", cells=["Cell added A", "Cell C"])
+    assert result["engine"] == "direct_xml" and result["tracked"] is False and result["revisions_added"] == []
+    assert raw_revisions(out) == raw_revisions(property_only)
+    from research_mcp.sections import read_layout
+
+    assert {"Cell added A", "Cell C"} <= {item.text for item in read_layout(out).paragraphs}
+
+
+def test_insert_table_on_property_only_revisions_goes_direct_xml(property_only, tmp_path, no_word):
+    """Plan 916 S5: insert_table on a revised document, tracking off, inserts the table plainly by direct XML
+    (it used to refuse here); every property change stays byte-identical."""
     from research_mcp import editing
+    from research_mcp.sections import read_layout
 
     before = file_sha256(property_only)
     out = tmp_path / "out.docx"
-    with pytest.raises(RefusedUnsafe, match="3 tracked revision elements"):
-        call(editing, property_only, out)
-    assert not out.exists() and file_sha256(property_only) == before
+    result = editing.insert_table_to_version(property_only, out, after_paragraph_index=1, headers=("A", "B"),
+                                             rows=(("1", "2"),), descriptive_columns=(1,))
+    assert result["engine"] == "direct_xml" and result["tracked"] is False and result["revisions_added"] == []
+    assert raw_revisions(out) == raw_revisions(property_only) and file_sha256(property_only) == before
+    assert {"A", "B", "1", "2"} <= {item.text for item in read_layout(out).paragraphs}
 
 
 def test_add_comment_keeps_property_only_revisions(property_only, tmp_path, no_word):
@@ -190,12 +225,30 @@ def test_add_comment_keeps_property_only_revisions(property_only, tmp_path, no_w
     assert raw_revisions(out) == raw_revisions(property_only)
 
 
+def test_style_text_on_property_only_revisions_is_direct_xml(property_only, tmp_path, no_word, monkeypatch):
+    """Plan 864 S6: style_text on a revised document (property changes count) goes through direct XML, never
+    Word, and keeps every existing revision byte-identical (it used to refuse here)."""
+    from research_mcp import server, style_tools
+
+    monkeypatch.setattr(style_tools, "run_operation", no_word_run)
+    sha = file_sha256(property_only)
+    shown = server.style_text(str(property_only), sha, 1, "opening", bold=True)
+    assert shown["status"] == "preview" and shown["engine"] == "direct_xml" and shown["tracked"] is False
+    out = tmp_path / "styled-text.docx"
+    result = server.style_text(str(property_only), sha, 1, "opening", bold=True, output=str(out),
+                               preview_only=False)
+    assert result["engine"] == "direct_xml" and result["revisions_added"] == []
+    assert raw_revisions(out) == raw_revisions(property_only) and file_sha256(property_only) == sha
+
+
+def no_word_run(*args, **kwargs):
+    raise AssertionError("Word was started on a document with tracked revisions")
+
+
 def test_style_tools_refuse_property_only_revisions_before_word(property_only, tmp_path, no_word):
     from research_mcp import server
 
     sha = file_sha256(property_only)
-    with pytest.raises(RefusedUnsafe, match="style_text: source contains 3 tracked revision elements"):
-        server.style_text(str(property_only), sha, 1, "opening", bold=True, preview_only=False)
     out = tmp_path / "styled.docx"
     with pytest.raises(RefusedUnsafe, match="apply_document_style: source contains 3 tracked revision"):
         server.apply_document_style(str(property_only), str(out), sha)
@@ -205,8 +258,8 @@ def test_style_tools_refuse_property_only_revisions_before_word(property_only, t
 @pytest.mark.parametrize("tool, call", [
     ("clean_bookmarks", lambda server, src, out: server.clean_bookmarks(src, out, ["h"])),
     ("format_tables", lambda server, src, out: server.format_tables(src, out, [])),
-    ("insert_zotero_citation", lambda server, src, out: server.insert_zotero_citation(
-        src, out, 1, "opening", ["ABCD1234"], src)),
+    # insert_zotero_citation is allowed on revised documents since plan 864 decision 16, guarded by the
+    # revision snapshot (tests/test_citation_insert_tracked.py).
 ])
 def test_other_word_tools_refuse_revisions_before_word(property_only, tmp_path, no_word, tool, call):
     """review s2r2 F5: these tools save through Word, which rewrites other authors' revision records."""
@@ -220,14 +273,16 @@ def test_other_word_tools_refuse_revisions_before_word(property_only, tmp_path, 
 
 
 @windows_only
-def test_edit_document_insert_on_property_only_revisions_publishes_nothing(property_only, in_process, no_word):
-    before = file_sha256(property_only)
-    result = run_batch(property_only, {"op_id": "i", "type": "insert_text", "paragraph_index": 1,
-                                       "position": "after", "anchor": "opening", "text": " new"})
-    assert result.status in ("refused", "no_changes") and result.undo_token is None and result.output is None
-    assert result.operations[0].status == "failed"
-    assert "3 tracked revision elements" in result.operations[0].error.message
-    assert file_sha256(property_only) == before
+def test_edit_document_insert_on_property_only_revisions_inserts_plainly(property_only, in_process, no_word):
+    """Plan 864 S2 (decision 5): it used to refuse ("3 tracked revision elements"); now, tracking off, it inserts
+    untracked by direct XML, keeps every revision byte-identical and says tracking is off."""
+    before = raw_revisions(property_only)
+    result = run_batch(property_only, {"op_id": "i", "type": "insert_paragraph", "after_paragraph_index": 1,
+                                       "text": "New paragraph."})
+    assert result.status == "complete" and result.undo_token is not None, result
+    assert result.tracking == "off" and "tracking is off for your edits" in result.tracking_note
+    assert raw_revisions(property_only) == before
+    assert view(paragraphs(property_only)[1]) == "New paragraph."
 
 
 # -- F3: D5 is checked against the caller's request, not the planner's expectation --------------------------

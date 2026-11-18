@@ -170,7 +170,10 @@ def test_recorded_schema_sizes_have_only_documented_drift():
     """The historical map must not drift beyond the documented changes.
 
     The benchmark fixtures predate the collection-search refinement, the
-    citation-anchor contract, and current in-place workflow clarifications.
+    citation-anchor contract, current in-place workflow clarifications, and
+    the plan 864 `tracked` parameter on the Word-only tools, and the plan 864
+    S5 docstring for citations on documents with tracked changes, and the
+    plan 916 S4 tracked-formatting docstring of format_tables.
     Their old sizes remain necessary for calibrating
     the runs they actually recorded, so these differences are explicit
     rather than silently replacing the historical baseline. Any other change
@@ -182,9 +185,9 @@ def test_recorded_schema_sizes_have_only_documented_drift():
     assert set(frozen) <= set(live), sorted(set(frozen) - set(live))
     drifted = {name: (size, live[name]) for name, size in frozen.items() if live[name] != size}
     assert drifted == {
-        "clean_bookmarks": (474, 668),
-        "format_tables": (499, 2019),
-        "insert_zotero_citation": (1127, 1597),
+        "clean_bookmarks": (474, 864),
+        "format_tables": (499, 2406),
+        "insert_zotero_citation": (1127, 2279),
         "list_bookmarks": (307, 300),
         "search_zotero": (369, 941),
     }, (

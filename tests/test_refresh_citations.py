@@ -459,3 +459,50 @@ def test_in_place_and_undo_through_server(doc, fake):
     assert data["undo_token"] and data["sha256_before"] == original and sha(doc) != original
     server.undo_document(path=str(doc))
     assert sha(doc) == original
+
+
+# -- plan 924 S2: a citation in a tracked deletion or move is refused, never skipped ---------------------
+
+
+def _deleted(field_xml: str, rev: str = "w:del", rev_id: int = 106) -> str:
+    """A field as Word writes it inside a tracked deletion: w:delInstrText and w:delText (measured, plan 924)."""
+    if rev == "w:del":
+        field_xml = (field_xml.replace("w:instrText", "w:delInstrText").replace("<w:t>", "<w:delText>")
+                     .replace("</w:t>", "</w:delText>"))
+    return f'<{rev} w:id="{rev_id}" w:author="Reviewer B" w:date="2026-11-04T09:00:00Z">{field_xml}</{rev}>'
+
+
+@pytest.mark.parametrize("preview", [False, True])
+def test_citation_in_a_tracked_deletion_refused(tmp_path, fake, preview):
+    xml = body().replace(_field("cB", [_entry("K3")], ["(3)"]), _deleted(_field("cB", [_entry("K3")], ["(3)"])))
+    assert "w:delInstrText" in xml
+    doc = make_docx(tmp_path / "deleted.docx", xml)
+    out = tmp_path / "out.docx"
+    with pytest.raises(RefusedUnsafe, match=r"refresh_citations: 1 Zotero field\(s\) have their field code in a "
+                                            r"tracked deletion.*citation cB '\(3\)' in tracked revision w:del "
+                                            r"id=106 by 'Reviewer B'.*nothing was written"):
+        run(doc, out, preview=preview)
+    assert not fake.calls and not out.exists()
+
+
+def test_deleted_bibliography_refused(tmp_path, fake):
+    entries = [LIBRARY[k] for k in ("K1", "K2", "K3")]
+    bibl = _bibl(entries)
+    deleted = bibl.replace("w:instrText", "w:delInstrText").replace("<w:t>", "<w:delText>").replace(
+        "</w:t>", "</w:delText>").replace('<w:r><w:fldChar w:fldCharType="begin"/>',
+                                           '<w:del w:id="107" w:author="Reviewer B" w:date="2026-11-04T09:00:00Z">'
+                                           '<w:r><w:fldChar w:fldCharType="begin"/>', 1)
+    deleted = deleted.replace('<w:r><w:fldChar w:fldCharType="separate"/></w:r>',
+                              '<w:r><w:fldChar w:fldCharType="separate"/></w:r></w:del>', 1)
+    doc = make_docx(tmp_path / "deleted_bibl.docx", body().replace(bibl, deleted))
+    with pytest.raises(RefusedUnsafe, match=r"the bibliography in tracked revision w:del id=107"):
+        run(doc, tmp_path / "out.docx")
+    assert not fake.calls
+
+
+def test_moved_citation_refused(tmp_path, fake):
+    cluster = _field("cB", [_entry("K3")], ["(3)"])
+    doc = make_docx(tmp_path / "moved.docx", body().replace(cluster, _deleted(cluster, "w:moveFrom", 108)))
+    with pytest.raises(RefusedUnsafe, match=r"citation cB sits inside tracked revision w:moveFrom id=108"):
+        run(doc, tmp_path / "out.docx")
+    assert not fake.calls

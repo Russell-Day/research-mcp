@@ -41,6 +41,8 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 from .audit import is_file_locked
+from .errors import RefusedUnsafe
+from .legacy_doc import OLE2_HEADER, not_a_package
 from .ooxml import NS, W
 
 
@@ -63,6 +65,8 @@ class DocumentSnapshot:
 def read_snapshot(path: str | Path) -> DocumentSnapshot:
     resolved = Path(path).resolve(strict=True)
     package = resolved.read_bytes()
+    if package.startswith(OLE2_HEADER):
+        raise RefusedUnsafe(not_a_package(resolved))
     return DocumentSnapshot(
         path=resolved,
         package=package,
@@ -104,7 +108,7 @@ def _paragraph_text(paragraph: ET.Element) -> str:
 
     parts: list[str] = []
 
-    def emit(node: ET.Element) -> None:
+    def emit(node: ET.Element, deleted: bool = False) -> None:
         for child in node:
             # `w:pPr/w:tabs/w:tab` are tab *stop definitions*, not tab
             # characters. Walking the whole subtree picks them up and prepends
@@ -114,13 +118,17 @@ def _paragraph_text(paragraph: ET.Element) -> str:
             if child.tag == W + "t":
                 parts.append(child.text or "")
             elif child.tag == W + "tab":
-                parts.append("\t")
+                if not deleted:
+                    parts.append("\t")
             elif child.tag in (W + "br", W + "cr"):
                 # Both verified against live Word captures: a page break reads
                 # \x0c and a plain line break reads \v (tests/test_paragraphs.py).
-                parts.append("\x0c" if child.get(W + "type") == "page" else "\v")
+                # Inside a tracked deletion (w:del, w:moveFrom) a tab or break
+                # is not in the accepted text, as its w:delText is not.
+                if not deleted:
+                    parts.append("\x0c" if child.get(W + "type") == "page" else "\v")
             else:
-                emit(child)
+                emit(child, deleted or child.tag in (W + "del", W + "moveFrom"))
 
     emit(paragraph)
     return "".join(parts)
@@ -337,6 +345,9 @@ def inspect_document(
     if lock_reason:
         summary["lock_reason"] = lock_reason
     summary["unusual_characters"] = _unusual_characters(snapshot.path)
+    from .track_setting import describe as _track_changes
+
+    summary["track_changes"] = _track_changes(snapshot.path)
 
     if include_comments:
         # Local import avoids a module cycle: comment anchor reconstruction

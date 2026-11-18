@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Literal
+import shutil
+import tempfile
 import zipfile
 import xml.etree.ElementTree as ET
 
@@ -383,17 +385,53 @@ def _verify_protected_structure(
         )
 
 
+# Word's time for a pass (plan 973 S1). The untracked pass keeps IsolatedWordDocument's 30 s. With Track Changes
+# on, Word records a revision for every paragraph and run it formats, and the pass grows with the document:
+# measured on two real documents, 79 paragraphs took 31 s and 117 paragraphs (a 23x5 table) 96 s. The tracked pass
+# gets 2 s per paragraph (w:p, table cells included) over a 30 s base, at least 60 s and at most 600 s; the worker
+# process gets 60 s more than its Word session.
+UNTRACKED_WORD_TIMEOUT_SECONDS = 30.0
+TRACKED_WORD_SECONDS_PER_PARAGRAPH = 2.0
+TRACKED_WORD_TIMEOUT_CAP_SECONDS = 600.0
+WORKER_MARGIN_SECONDS = 60.0
+
+
+def word_timeout_seconds(paragraph_count: int, tracked: bool) -> float:
+    """How long the isolated Word session of a style pass may run."""
+
+    if not tracked:
+        return UNTRACKED_WORD_TIMEOUT_SECONDS
+    return min(TRACKED_WORD_TIMEOUT_CAP_SECONDS,
+               max(60.0, 30.0 + TRACKED_WORD_SECONDS_PER_PARAGRAPH * paragraph_count))
+
+
+def worker_timeout_seconds(paragraph_count: int, tracked: bool) -> float:
+    """How long the style worker process may run: its Word session, plus time to start and to clean up (never
+    below the 120 s it had before)."""
+
+    return max(120.0, word_timeout_seconds(paragraph_count, tracked) + WORKER_MARGIN_SECONDS)
+
+
 def _style_document_local(
     path: str | Path,
     profile_name: str = "radiology_ai",
     visible: bool = False,
     emphasis_policy: str = "preserve",
+    tracked: bool = False,
 ) -> dict[str, Any]:
     """Apply COM styling to one already-staged document and save it.
+
+    ``tracked`` (plan 916 S4) makes the pass with Word's TrackRevisions on and restores the document's own
+    setting before the save; the parent relabels and checks the revisions (``word_tracked.finish``).
 
     This function is the operation worker entry point.  It deliberately does
     not stage, publish, or audit the source; the parent process owns those
     safety gates and passes only a disposable staging path here.
+
+    Untracked, it first saves Word's own form of the untouched document to a
+    new temporary folder and returns its path as ``baseline`` (plan 973 S1);
+    the parent verifies against it when it preserves the source and removes
+    the folder. The tracked path gets that save from ``word_tracked.finish``.
     """
     profile = PROFILES.get(profile_name)
     if not profile:
@@ -402,8 +440,26 @@ def _style_document_local(
         )
 
     output_path = Path(path).resolve(strict=True)
-    with IsolatedWordDocument(output_path, visible=visible) as session:
+    baseline_folder = None if tracked else Path(tempfile.mkdtemp(prefix="research-mcp-style-baseline-"))
+    try:
+        return _style_in_word(output_path, profile, profile_name, visible, emphasis_policy, tracked, baseline_folder)
+    except BaseException:
+        if baseline_folder is not None:
+            shutil.rmtree(baseline_folder, ignore_errors=True)
+        raise
+
+
+def _style_in_word(output_path: Path, profile: JournalStyleProfile, profile_name: str, visible: bool,
+                   emphasis_policy: str, tracked: bool, baseline_folder: Path | None) -> dict[str, Any]:
+    baseline = None
+    timeout = word_timeout_seconds(audit_docx(output_path).paragraph_count, tracked)
+    with IsolatedWordDocument(output_path, visible=visible, timeout_seconds=timeout) as session:
         doc = session.document
+        if baseline_folder is not None:
+            baseline = session.save_as(baseline_folder / "baseline.docx")
+        if tracked:
+            from .word_tracked import set_word_tracking
+            original_tracking = set_word_tracking(doc, True)
 
         # 1. Enforce Page Setup Margins (72 points = 1 inch)
         setup = doc.PageSetup
@@ -486,12 +542,18 @@ def _style_document_local(
                 fmt.SpaceBefore = profile.space_before_pt
                 fmt.SpaceAfter = profile.space_after_pt
 
-        session.save()
+        if tracked:
+            set_word_tracking(doc, original_tracking)
+        if baseline is None:
+            session.save()
+        else:
+            session.save_as(output_path)
 
     return {
         "output": str(output_path),
         "profile": profile_name,
         "paragraphs_styled": styled_count,
+        "baseline": None if baseline is None else str(baseline),
     }
 
 
@@ -503,8 +565,13 @@ def apply_journal_style(
     visible: bool = False,
     emphasis_policy: str = "preserve",
     source_sha256: str | None = None,
+    tracked: bool = False,
+    author: str | None = None,
 ) -> dict[str, Any]:
-    """Apply journal typography through a bounded isolated Word operation."""
+    """Apply journal typography through a bounded isolated Word operation.
+
+    ``tracked`` (plan 916 S4): Word records the pass as tracked changes, relabelled to ``author``; the untracked
+    parts get comments, and the checks below run on Word's Accept All of the result (``word_tracked.finish``)."""
     profile = PROFILES.get(profile_name)
     if not profile:
         raise RefusedUnsafe(
@@ -526,24 +593,15 @@ def apply_journal_style(
     # only perform offline audits, while the worker owns the COM lifecycle.
     from .operation_process import run_operation
 
-    with staged_document(resolved_source, target_output) as output_path:
-        if audit_docx(output_path).sha256 != before.sha256:
-            raise RefusedUnsafe("Source changed while staging; inspect again")
-        worker_result = run_operation(
-            "style",
-            {
-                "source": str(output_path),
-                "profile_name": profile_name,
-                "visible": visible,
-                "emphasis_policy": emphasis_policy,
-            },
-            timeout_seconds=120,
-        )
-
-        after = audit_docx(output_path)
-        if _body_field_instructions(output_path) != before_instructions:
+    def verify(path: Path, reference: Path) -> None:
+        """Checks of a saved result against ``reference``: Word's own save of the untouched document when it
+        preserves the source (plan 973 S1: Word appends an empty paragraph after a body-final table), else the
+        source."""
+        reference_audit = before if Path(reference) == resolved_source else audit_docx(reference)
+        after = audit_docx(path)
+        if _body_field_instructions(path) != before_instructions:
             raise VerificationFailed("styling changed main-document field instructions")
-        after_emphasis = snapshot_emphasis(output_path)
+        after_emphasis = snapshot_emphasis(path)
         if emphasis_policy == "preserve" and after_emphasis != before_emphasis:
             raise VerificationFailed("layout styling changed bold or italic outside its declared scope")
         if emphasis_policy == "headings_and_summary":
@@ -556,12 +614,45 @@ def apply_journal_style(
                 expected = (text, True if key[0] in allowed_paragraphs else bold, italic)
                 if after_emphasis[key] != expected:
                     raise VerificationFailed("semantic styling changed emphasis outside the declared paragraph roles", expected=expected, actual=after_emphasis[key])
-        _verify_saved_typography(output_path, profile)
+        _verify_saved_typography(path, profile)
         _verify_protected_structure(
-            before,
+            reference_audit,
             after,
             allow_header_field_loss=profile.strip_header_footers,
         )
+
+    from . import word_tracked
+    from .word_baseline import choose_reference
+
+    tracking = word_tracked.off_fields()
+    with staged_document(resolved_source, target_output) as output_path:
+        if audit_docx(output_path).sha256 != before.sha256:
+            raise RefusedUnsafe("Source changed while staging; inspect again")
+        with word_tracked.input_copy(output_path, tracked) as input_copy:
+            worker_result = run_operation(
+                "style",
+                {
+                    "source": str(output_path),
+                    "profile_name": profile_name,
+                    "visible": visible,
+                    "emphasis_policy": emphasis_policy,
+                    "tracked": tracked,
+                },
+                timeout_seconds=worker_timeout_seconds(before.paragraph_count, tracked),
+            )
+            baseline = worker_result.get("baseline")
+            try:
+                if tracked:
+                    tracking = word_tracked.finish(output_path, input_copy, author=author or "Claude",
+                                                   verify_accept=verify)
+                else:
+                    reference = choose_reference(resolved_source, baseline)
+                    verify(output_path, reference.path)
+                    tracking = {**tracking, "compared_against": reference.compared_against}
+            finally:
+                if baseline:
+                    shutil.rmtree(Path(baseline).parent, ignore_errors=True)
+        after = audit_docx(output_path)
 
     return {
         "source": str(resolved_source),
@@ -586,4 +677,5 @@ def apply_journal_style(
         },
         "protected_structure_unchanged": True,
         "emphasis_policy": emphasis_policy,
+        **tracking,
     }

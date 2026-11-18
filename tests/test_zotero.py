@@ -640,3 +640,181 @@ def test_add_item_by_doi_refuses_nonexistent_8char_collection_key(monkeypatch):
 
     with pytest.raises(RefusedUnsafe, match="collection key 'NOTEXIST' was not found"):
         add_item_by_doi("10.1000/paper", collection="NOTEXIST")
+
+
+# -- arXiv DOIs (DataCite) -----------------------------------------------------
+
+DATACITE_ARXIV = {
+    "data": {
+        "id": "10.48550/arxiv.2601.17151",
+        "attributes": {
+            "doi": "10.48550/arxiv.2601.17151",
+            "titles": [{"title": "A Preprint\n  About Things"}],
+            "creators": [
+                {"name": "Doe, Jane", "nameType": "Personal", "givenName": "Jane", "familyName": "Doe"},
+                {"name": "Roe, Richard", "nameType": "Personal"},
+                {"name": "The Consortium", "nameType": "Organizational"},
+            ],
+            "publisher": "arXiv",
+            "publicationYear": 2026,
+            "dates": [{"date": "2026-01-23T18:00:00Z", "dateType": "Submitted"}, {"date": "2026", "dateType": "Issued"}],
+            "descriptions": [{"description": "An arXiv abstract\n  where $k<n$ holds.", "descriptionType": "Abstract"}],
+        },
+    },
+}
+
+
+class PreprintWriteClient(FakeWriteClient):
+    def item_template(self, item_type):
+        assert item_type == "preprint"
+        return {
+            "itemType": "preprint", "title": "", "creators": [], "abstractNote": "", "genre": "",
+            "repository": "", "archiveID": "", "place": "", "date": "", "DOI": "", "url": "",
+        }
+
+
+def _arxiv_urlopen(fake_write, seen, *, datacite=None, pdf=b"%PDF-1.4 arxiv"):
+    def fake_urlopen(request, timeout):
+        url = request.full_url
+        seen.append(url)
+        if url.startswith("http://127.0.0.1"):
+            if "/items/top" in url:
+                return Response(json.dumps([]).encode())
+            if "/collections?limit" in url:
+                return Response(json.dumps([]).encode())
+            if url.rstrip("/").endswith(f"/items/{fake_write.next_item_key}"):
+                return Response(json.dumps({"key": fake_write.next_item_key, "data": {}}).encode())
+            raise AssertionError(f"unexpected local API call: {url}")
+        if url == "https://api.datacite.org/dois/10.48550/arxiv.2601.17151":
+            if datacite is not None:
+                return datacite(url)
+            return Response(json.dumps(DATACITE_ARXIV).encode())
+        if url == "https://arxiv.org/pdf/2601.17151":
+            if isinstance(pdf, Exception):
+                raise pdf
+            return Response(pdf)
+        raise AssertionError(f"unexpected url: {url}")
+
+    return fake_urlopen
+
+
+def test_add_item_by_doi_arxiv_doi_uses_datacite_and_makes_preprint(monkeypatch):
+    monkeypatch.delenv("ZOTERO_MCP_CONTACT_EMAIL", raising=False)
+    fake_write = PreprintWriteClient()
+    seen: list[str] = []
+    monkeypatch.setattr("research_mcp.zotero._write_client_from_env", lambda: fake_write)
+    monkeypatch.setattr("research_mcp.zotero.urlopen", _arxiv_urlopen(fake_write, seen))
+
+    result = add_item_by_doi("https://doi.org/10.48550/arXiv.2601.17151")
+
+    assert not any("crossref" in url for url in seen)
+    item = fake_write.created_items[0]
+    assert item["itemType"] == "preprint"
+    assert item["title"] == "A Preprint About Things"
+    assert item["creators"] == [
+        {"creatorType": "author", "firstName": "Jane", "lastName": "Doe"},
+        {"creatorType": "author", "firstName": "Richard", "lastName": "Roe"},
+        {"creatorType": "author", "name": "The Consortium"},
+    ]
+    assert item["date"] == "2026-01-23"
+    assert item["repository"] == "arXiv"
+    assert item["archiveID"] == "arXiv:2601.17151"
+    assert item["DOI"] == "10.48550/arXiv.2601.17151"
+    assert item["url"] == "https://arxiv.org/abs/2601.17151"
+    assert item["abstractNote"] == "An arXiv abstract where $k<n$ holds."
+    assert result["created"] is True
+    assert result["doi"] == "10.48550/arxiv.2601.17151"
+    assert result["first_author"] == "Doe"
+    # The arXiv PDF is always available; no Unpaywall contact email needed.
+    assert result["pdf_attached"] is True
+    assert result["pdf_status"] == "attached"
+    assert fake_write.attachments[0][1] == fake_write.next_item_key
+
+
+def test_add_item_by_doi_arxiv_pdf_failure_does_not_fail_add(monkeypatch):
+    fake_write = PreprintWriteClient()
+    monkeypatch.setattr("research_mcp.zotero._write_client_from_env", lambda: fake_write)
+    monkeypatch.setattr(
+        "research_mcp.zotero.urlopen", _arxiv_urlopen(fake_write, [], pdf=OSError("reset"))
+    )
+
+    result = add_item_by_doi("10.48550/arXiv.2601.17151v2")  # version suffix dropped
+    assert result["doi"] == "10.48550/arxiv.2601.17151"
+    assert fake_write.created_items[0]["archiveID"] == "arXiv:2601.17151"
+    assert result["success"] is True
+    assert result["pdf_attached"] is False
+    assert result["pdf_status"] == "download failed"
+
+
+def test_add_item_by_doi_arxiv_datacite_404_raises_before_writing(monkeypatch):
+    def fail_write_client():
+        raise AssertionError("write client should not be constructed when the DOI is unknown")
+
+    def not_found(url):
+        raise HTTPError(url, 404, "Not Found", None, None)
+
+    monkeypatch.setattr("research_mcp.zotero._write_client_from_env", fail_write_client)
+    monkeypatch.setattr(
+        "research_mcp.zotero.urlopen", _arxiv_urlopen(FakeWriteClient(), [], datacite=not_found)
+    )
+    with pytest.raises(ZoteroItemNotFound, match="DataCite"):
+        add_item_by_doi("10.48550/arXiv.2601.17151")
+
+
+def test_add_item_by_doi_dedups_arxiv_item_stored_with_arxiv_casing(monkeypatch):
+    def fake_urlopen(request, timeout):
+        url = request.full_url
+        if "/items/top" in url:
+            page = [{"key": "TQTBKHFH", "data": {"key": "TQTBKHFH", "DOI": "10.48550/arXiv.2601.17151"}}]
+            return Response(json.dumps(page if "start=0" in url else []).encode())
+        if url.rstrip("/").endswith("/items/TQTBKHFH"):
+            return Response(json.dumps({"key": "TQTBKHFH", "data": {"title": "A Preprint"}}).encode())
+        raise AssertionError(f"unexpected call: {url}")
+
+    monkeypatch.setattr("research_mcp.zotero.urlopen", fake_urlopen)
+    result = add_item_by_doi("10.48550/arXiv.2601.17151")
+    assert result["created"] is False
+    assert result["item_key"] == "TQTBKHFH"
+
+
+@pytest.mark.parametrize("wanted", ["10.48550/arXiv.2601.17151", "10.48550/arXiv.2601.17151v1"])
+def test_add_item_by_doi_dedups_arxiv_item_stored_with_version(monkeypatch, wanted):
+    def fake_urlopen(request, timeout):
+        url = request.full_url
+        if "/items/top" in url:
+            page = [{"key": "OLDV2KEY", "data": {"key": "OLDV2KEY", "DOI": "10.48550/arXiv.2601.17151v2"}}]
+            return Response(json.dumps(page if "start=0" in url else []).encode())
+        if url.rstrip("/").endswith("/items/OLDV2KEY"):
+            return Response(json.dumps({"key": "OLDV2KEY", "data": {"title": "A Preprint"}}).encode())
+        raise AssertionError(f"unexpected call: {url}")
+
+    monkeypatch.setattr("research_mcp.zotero.urlopen", fake_urlopen)
+    result = add_item_by_doi(wanted)
+    assert result["created"] is False
+    assert result["item_key"] == "OLDV2KEY"
+
+
+def test_find_by_doi_refuses_two_versions_of_one_arxiv_paper(monkeypatch):
+    def fake_urlopen(request, timeout):
+        page = [
+            {"key": "V1KEY", "data": {"key": "V1KEY", "DOI": "10.48550/arXiv.2601.17151v1"}},
+            {"key": "BASEKEY", "data": {"key": "BASEKEY", "DOI": "10.48550/arXiv.2601.17151"}},
+        ]
+        return Response(json.dumps(page if "start=0" in request.full_url else []).encode())
+
+    monkeypatch.setattr("research_mcp.zotero.urlopen", fake_urlopen)
+    with pytest.raises(RefusedUnsafe, match="matches multiple Zotero items"):
+        ZoteroClient().find_by_doi("10.48550/arXiv.2601.17151")
+
+
+def test_add_item_by_doi_arxiv_keeps_non_iso_date(monkeypatch):
+    fake_write = PreprintWriteClient()
+    record = json.loads(json.dumps(DATACITE_ARXIV))
+    record["data"]["attributes"]["dates"] = [{"date": "January 3, 2020", "dateType": "Submitted"}]
+    monkeypatch.setattr("research_mcp.zotero._write_client_from_env", lambda: fake_write)
+    monkeypatch.setattr(
+        "research_mcp.zotero.urlopen",
+        _arxiv_urlopen(fake_write, [], datacite=lambda url: Response(json.dumps(record).encode())),
+    )
+    add_item_by_doi("10.48550/arXiv.2601.17151")
+    assert fake_write.created_items[0]["date"] == "January 3, 2020"

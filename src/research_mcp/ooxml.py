@@ -145,6 +145,9 @@ class LogicalTable:
     vertical_merges: tuple[tuple[int, int, int, str], ...]
     horizontal_spans: tuple[tuple[int, int, int], ...]
     cell_hashes: tuple[str, ...] = ()
+    # (row, grid column, text the cell physically holds) of each vertical-merge continuation; ``cells`` shows the
+    # merge's label there (plan 973 S1).
+    continuations: tuple[tuple[int, int, str], ...] = ()
 
     def __post_init__(self):
         if not self.cell_hashes and self.cells:
@@ -156,7 +159,31 @@ class LogicalTable:
             object.__setattr__(self, "cell_hashes", hashes)
 
 
+def _grid_skip(row: ET.Element, name: str) -> int:
+    node = row.find(f"w:trPr/w:{name}", NS)
+    return max(0, int(node.get(W + "val", "0"))) if node is not None else 0
+
+
+def row_cells(row: ET.Element) -> tuple[tuple[int, int], ...]:
+    """A row's real cells as (first grid column, grid columns spanned), in the order Word's ``Table.Cell(row, n)``
+    numbers them: ``w:gridBefore`` empty grid columns come first, then each ``w:tc`` covers ``w:gridSpan`` columns
+    (plan 973 S1). ``parse_table`` and ``tables.table_layouts`` both read cells through this."""
+
+    column = 1 + _grid_skip(row, "gridBefore")
+    cells = []
+    for cell in row.findall("w:tc", NS):
+        span_node = cell.find("w:tcPr/w:gridSpan", NS)
+        span = max(1, int(span_node.get(W + "val", "1"))) if span_node is not None else 1
+        cells.append((column, span))
+        column += span
+    return tuple(cells)
+
+
 def parse_table(table: ET.Element) -> LogicalTable:
+    """The table's text by grid position. A cell's text fills every grid column it spans; grid columns no cell
+    covers (``w:gridBefore``/``w:gridAfter``) read as ""; a vertical-merge continuation reads as its merge's label,
+    and what it physically holds is kept in ``continuations``."""
+
     grid = table.findall("w:tblGrid/w:gridCol", NS)
     declared_columns = len(grid)
     raw_rows: list[list[str | None]] = []
@@ -164,15 +191,17 @@ def parse_table(table: ET.Element) -> LogicalTable:
     merge_starts: dict[tuple[int, int], str] = {}
     merge_ends: dict[tuple[int, int], int] = {}
     horizontal_spans: list[tuple[int, int, int]] = []
+    continuations: list[tuple[int, int, str]] = []
     max_columns = declared_columns
 
     for row_index, row in enumerate(table.findall("w:tr", NS), start=1):
         parsed_row: list[str | None] = []
-        column_cursor = 1
-        for cell in row.findall("w:tc", NS):
+        cells = row.findall("w:tc", NS)
+        for cell, (column_cursor, span) in zip(cells, row_cells(row)):
+            for empty_column in range(len(parsed_row) + 1, column_cursor):
+                active_vertical.pop(empty_column, None)
+                parsed_row.append("")
             text = "".join(t.text or "" for t in cell.findall(".//w:t", NS))
-            grid_span_node = cell.find("w:tcPr/w:gridSpan", NS)
-            span = int(grid_span_node.get(W + "val", "1")) if grid_span_node is not None else 1
             if span > 1:
                 horizontal_spans.append((row_index, column_cursor, span))
 
@@ -185,6 +214,7 @@ def parse_table(table: ET.Element) -> LogicalTable:
                     merge_ends[(row_index, column_cursor)] = row_index
                 elif column_cursor in active_vertical:
                     start_row, label = active_vertical[column_cursor]
+                    continuations.append((row_index, column_cursor, text))
                     text = label
                     merge_ends[(start_row, column_cursor)] = row_index
             else:
@@ -192,7 +222,7 @@ def parse_table(table: ET.Element) -> LogicalTable:
 
             for _ in range(span):
                 parsed_row.append(text)
-                column_cursor += 1
+        parsed_row.extend([""] * _grid_skip(row, "gridAfter"))
 
         max_columns = max(max_columns, len(parsed_row))
         raw_rows.append(parsed_row)
@@ -211,6 +241,7 @@ def parse_table(table: ET.Element) -> LogicalTable:
         cells=tuple(normalized_rows),
         vertical_merges=vertical_merges,
         horizontal_spans=tuple(horizontal_spans),
+        continuations=tuple(continuations),
     )
 
 

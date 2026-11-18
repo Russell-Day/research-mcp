@@ -453,7 +453,7 @@ def test_print_shows_every_client_and_changes_nothing(home):
     all_clients(home)
     code, out, commands = run_setup(home, ["--print"])
     assert code == 0 and commands == []
-    for label in ("Claude Desktop", "Claude Code", "Codex", "Cursor", "VS Code"):
+    for label in sc.CLIENT_LABELS.values():
         assert f"# {label}" in out
     assert "[mcp_servers.research]" in out and '"servers"' in out
     assert not any(path.exists() for path in client_files(home).values())
@@ -727,3 +727,79 @@ def test_main_module_runs_as_a_plain_script():
                             timeout=120, cwd=script.parent)
     assert result.returncode == 0, result.stderr
     assert result.stdout.startswith("research-mcp ")
+
+
+# --- the ChatGPT desktop app (it reads Codex's config.toml) ---------------------------------------------------
+
+
+def store_app(home: sc.Home, package: str = "OpenAI.Codex_2p2nqsd0c76g0") -> None:
+    (home.localappdata / "Packages" / package).mkdir(parents=True)
+
+
+@pytest.mark.parametrize("package", ["OpenAI.Codex_2p2nqsd0c76g0", "OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0"])
+def test_chatgpt_store_app_is_detected_and_gets_the_codex_config(home, package):
+    store_app(home, package)
+    assert not home.codex_home.exists()
+    code, out, _ = run_setup(home, ["--yes"])
+    assert code == 0, out
+    table = tomllib.loads(client_files(home)["codex"].read_text(encoding="utf-8"))["mcp_servers"]["research"]
+    assert table["args"] == ["research-mcp"]
+    assert "ChatGPT app / Codex: wrote" in out
+    assert "type /mcp in a chat" in out and "use a Codex chat" in out
+    assert "research-mcp chatgpt" not in out  # the web tunnel isn't offered to someone with the app
+
+
+def test_codex_runtime_package_alone_is_not_the_app(home):
+    store_app(home, "OpenAI.CodexPrimaryRuntime.v26-1110-778-0_3k8sg7r9htsxt")
+    assert not sc.chatgpt_app_installed(home)
+
+
+def test_client_chatgpt_is_the_codex_target(home):
+    code, out, _ = run_setup(home, ["--yes", "--client", "chatgpt"])
+    assert code == 0, out
+    assert client_files(home)["codex"].exists()
+    assert not client_files(home)["cursor"].exists()
+    assert "type /mcp in a chat" in out
+    # No ChatGPT app on this PC: the web route is still named.
+    assert "ChatGPT on the web: run `research-mcp chatgpt`" in out
+
+
+def test_app_installed_but_not_chosen_names_the_client_flag(home):
+    store_app(home)
+    code, out, _ = run_setup(home, ["--yes", "--client", "cursor"])
+    assert code == 0, out
+    assert not client_files(home)["codex"].exists()
+    assert "`research-mcp setup --client chatgpt` adds research-mcp to it" in out
+    assert "research-mcp chatgpt` and paste" not in out
+
+
+def test_doctor_names_the_chatgpt_app(home, monkeypatch):
+    monkeypatch.setattr(sc.sys, "platform", "win32")
+    monkeypatch.setattr(sc.sys, "version_info", (3, 13, 0, "final", 0))
+    store_app(home)
+    code, out = run_doctor(home, fetch=fake_fetch(), word_registered=lambda: True)
+    assert code == 0, out
+    assert "--client chatgpt" in out
+    run_setup(home, ["--yes", "--client", "chatgpt"])
+    code, out = run_doctor(home, fetch=fake_fetch(), word_registered=lambda: True)
+    assert "ChatGPT app / Codex:" in out and "(research)" in out
+    assert "--client chatgpt" not in out
+
+
+def test_codex_cli_without_the_app_gets_no_chatgpt_app_steps(home):
+    home.codex_home.mkdir(parents=True)
+    code, out, _ = run_setup(home, ["--yes"], which=lambda name: r"C:\bin\codex.exe" if name == "codex" else None)
+    assert code == 0, out
+    assert "ChatGPT app / Codex: wrote" in out
+    assert "/mcp" not in out and "tray" not in out
+    assert "ChatGPT on the web: run `research-mcp chatgpt`" in out
+
+
+def test_refused_codex_config_with_the_app_gets_no_rerun_hint(home):
+    store_app(home)
+    home.codex_home.mkdir(parents=True)
+    client_files(home)["codex"].write_text("[mcp_servers\n", encoding="utf-8")
+    code, out, _ = run_setup(home, ["--yes"])
+    assert code == 1
+    assert "ChatGPT app / Codex: NOT changed" in out and "not valid TOML" in out
+    assert "--client chatgpt" not in out and "/mcp" not in out

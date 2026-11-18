@@ -47,12 +47,14 @@ from xml.sax.saxutils import escape
 
 from . import config
 from .errors import RefusedUnsafe, VerificationFailed
+from .edit_models import FIND_MAX
 
 DISPOSITION_LABELS = {
     "addressed": "Addressed",
     "rejected": "Rejected",
     "no_change": "No change",
     "needs_information": "Needs information",
+    "reply": "",  # plain reply: reply_text with no prefix, trimmed like every reply (plan 831 S3)
 }
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -1188,8 +1190,8 @@ def add_comment(source, output, *, paragraph_index: int, anchor: str, text: str,
     """New open thread on the unique visible ``anchor`` in ``paragraph_index``."""
 
     op = "add_comment"
-    if not 1 <= len(anchor) <= 255:
-        raise RefusedUnsafe("anchor must contain 1..255 characters")
+    if not 1 <= len(anchor) <= FIND_MAX:
+        raise RefusedUnsafe(f"anchor must contain 1..{FIND_MAX} characters")
     if not text.strip():
         raise RefusedUnsafe("comment text must not be empty")
     text = text.strip().replace("\r\n", "\n").replace("\r", "\n")
@@ -1255,7 +1257,8 @@ def reply_comment(source, output, *, comment_id: str, disposition: str, reply_te
         raise RefusedUnsafe("reply_text must not be empty")
     author, initials = _clean_author(author, initials, op)
     now = now or _now()
-    rendered = f"{DISPOSITION_LABELS[disposition]}: {reply_text.strip()}"
+    label = DISPOSITION_LABELS[disposition]
+    rendered = f"{label}: {reply_text.strip()}" if label else reply_text.strip()
     source, output = Path(source), Path(output)
     package = _Package(source, op)
     comments = _Comments(package)
@@ -1439,6 +1442,83 @@ def comment_paragraphs(path, comment_id: str) -> list[int] | None:
     if not indices:
         return None
     return list(range(min(indices), max(indices) + 1))
+
+
+def _edits_in_effect(hist: dict) -> set[str]:
+    """Ids of the recorded MCP edits whose result the document still holds (after the last history entry).
+
+    Walks the history in order, tracking the set of edit ids in effect: an edit adds its id; an undo returns
+    to the set in effect just before the entry it undid (`undid`; so undoing edit 3 of 5 drops 3, 4 and 5,
+    undoing a checkpoint label returns to that checkpoint, and undoing an undo re-applies); checkpoints and
+    outside changes keep the set. An undo whose `undid` entry is unknown (pruned) falls back to the set last
+    seen at the state it restored (by sha).
+    """
+    before_entry: dict[str, frozenset[str]] = {}
+    at_sha: dict[str, frozenset[str]] = {}
+    applied: frozenset[str] = frozenset()
+    for entry in hist.get("entries", []):
+        before = str(entry.get("sha_before") or "").lower()
+        after = str(entry.get("sha_after") or "").lower()
+        if before:
+            at_sha.setdefault(before, applied)
+        before_entry[entry.get("id", "")] = applied
+        if entry.get("kind") == "edit":
+            applied = applied | {entry["id"]}
+        elif entry.get("kind") == "undo":
+            undid = entry.get("undid")
+            applied = before_entry[undid] if undid in before_entry else at_sha.get(after, frozenset())
+        if after:
+            at_sha[after] = applied
+    return set(applied)
+
+
+def addressed_evidence(document, current, evidence: list[str]) -> list[dict]:
+    """Check `addressed_by` evidence for a reply (plan 831 S3); refuse naming any item that does not hold.
+
+    Each item is either a revision id (digits, as list_revisions shows it) that exists in `current` (the
+    staged document the reply is written to), or an undo_token / history entry id of an MCP edit of
+    `document` (the caller's file) that is still in effect, i.e. not undone or pruned.
+    """
+    from . import checkpoints as ck
+    from . import revisions
+
+    found: list[dict] = []
+    problems: list[str] = []
+    revision_items = [item for item in evidence if item.strip().isdigit()]
+    history_items = [item for item in evidence if not item.strip().isdigit()]
+    if revision_items:
+        _, doc = revisions.load(current)
+        by_id = {str(revision.id): revision for revision in doc.revisions}
+        for item in revision_items:
+            revision = by_id.get(item.strip())
+            if revision is None:
+                problems.append(f"revision {item!r} is not in the document (list_revisions shows the current ids)")
+                continue
+            data = revision.as_dict()
+            found.append({"evidence": item, "kind": "revision", "type": data["type"], "author": data["author"],
+                          "paragraph_index": data["paragraph_index"], "text": (data["text"] or "")[:120]})
+    if history_items:
+        document = Path(document)
+        hist = ck.load(document)
+        in_effect = _edits_in_effect(hist)
+        for item in history_items:
+            token = item.strip()
+            entry = next((e for e in hist.get("entries", []) if e.get("id") == token), None)
+            if entry is None:
+                gone = next((d for d in hist.get("dropped", []) if d.get("id") == token), None)
+                problems.append(f"{item!r} is not in this document's history"
+                                + (f" (pruned: {gone.get('reason')})" if gone else
+                                   "; use an undo_token from an earlier edit of this file or a revision id"))
+            elif entry.get("kind") != "edit":
+                problems.append(f"{item!r} is a {entry.get('kind')} entry, not an edit")
+            elif token not in in_effect:
+                problems.append(f"edit {item!r} was undone; it no longer answers the comment")
+            else:
+                found.append({"evidence": item, "kind": "edit", "time": entry.get("time"), "tool": entry.get("tool"),
+                              "op": entry.get("op"), "summary": entry.get("summary")})
+    if problems:
+        raise RefusedUnsafe("reply_comment: addressed_by evidence does not hold: " + "; ".join(problems))
+    return found
 
 
 def apply_operation(source, output, operation) -> dict:

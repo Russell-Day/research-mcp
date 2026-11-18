@@ -2,7 +2,8 @@
 
 setup: check this PC (Windows, Python, Word, Zotero), optionally store a Zotero write key and the comment
 author in the config file (``config.config_path()``), then add one ``research`` server entry to each MCP
-client the user picks: Claude Desktop, Claude Code, Codex, Cursor, VS Code. Existing client files are
+client the user picks: Claude Desktop, Claude Code, the ChatGPT app / Codex (one shared config), Cursor,
+VS Code. Existing client files are
 backed up and merged (other servers and settings are kept); a file that can't be parsed is refused, never
 replaced. Keys are never written into client configs: the server reads them from the config file.
 
@@ -48,10 +49,14 @@ CLIENTS = ("claude-desktop", "claude-code", "codex", "cursor", "vscode")
 CLIENT_LABELS = {
     "claude-desktop": "Claude Desktop",
     "claude-code": "Claude Code",
-    "codex": "Codex",
+    "codex": "ChatGPT app / Codex",
     "cursor": "Cursor",
     "vscode": "VS Code",
 }
+# Other --client names for an app that reads one of the configs above (the ChatGPT desktop app reads Codex's).
+CLIENT_ALIASES = {"chatgpt": "codex"}
+# Microsoft Store packages of the ChatGPT and Codex desktop apps (folders under %LOCALAPPDATA%\Packages).
+CHATGPT_APP_PACKAGES = ("OpenAI.Codex_*", "OpenAI.ChatGPT*")
 CODEX_STARTUP_TIMEOUT = 60  # seconds; uvx's first run downloads the package, Codex's default is 10
 
 
@@ -272,6 +277,14 @@ def merge_codex_toml(text: str | None, launch: Launch, *, where: str = "file") -
 # --- Finding clients ---------------------------------------------------------------------------------------
 
 
+def chatgpt_app_installed(home: Home) -> bool:
+    """Whether the ChatGPT or Codex desktop app (a Store app) is installed for this user; both run local MCP
+    servers from Codex's config.toml."""
+
+    packages = home.localappdata / "Packages"
+    return any(any(packages.glob(pattern)) for pattern in CHATGPT_APP_PACKAGES)
+
+
 def find_targets(home: Home, *, which: Callable[[str], str | None] = shutil.which) -> list[Target]:
     targets: list[Target] = []
 
@@ -298,8 +311,8 @@ def find_targets(home: Home, *, which: Callable[[str], str | None] = shutil.whic
         targets.append(Target("claude-code", "Claude Code", claude_json, "json:claude-code",
                               claude_json.exists() or (home.userprofile / ".claude").is_dir()))
 
-    targets.append(Target("codex", "Codex", home.codex_home / "config.toml", "toml:codex",
-                          home.codex_home.is_dir() or bool(which("codex"))))
+    targets.append(Target("codex", CLIENT_LABELS["codex"], home.codex_home / "config.toml", "toml:codex",
+                          home.codex_home.is_dir() or bool(which("codex")) or chatgpt_app_installed(home)))
     targets.append(Target("cursor", "Cursor", home.userprofile / ".cursor" / "mcp.json", "json:mcpServers",
                           (home.userprofile / ".cursor").is_dir() or bool(which("cursor"))))
     targets.append(Target("vscode", "VS Code", home.appdata / "Code" / "User" / "mcp.json", "json:servers",
@@ -685,8 +698,9 @@ def _setup_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--yes", "-y", action="store_true",
                         help="no questions: add the server to every detected client (or each --client)")
-    parser.add_argument("--client", action="append", choices=CLIENTS, default=[],
-                        help="add the server to this client (repeatable); skips detection for it")
+    parser.add_argument("--client", action="append", choices=CLIENTS + tuple(CLIENT_ALIASES), default=[],
+                        help="add the server to this client (repeatable); skips detection for it. "
+                             "chatgpt is the ChatGPT desktop app, which shares Codex's config")
     parser.add_argument("--print", dest="print_only", action="store_true",
                         help="print the config snippet for every client and change nothing")
     parser.add_argument("--dry-run", action="store_true", help="show what would change and change nothing")
@@ -834,7 +848,7 @@ def setup_main(argv: list[str] | None = None, *, home: Home | None = None, io: I
 
     # Client configs
     targets = find_targets(home, which=which)
-    wanted = set(args.client)
+    wanted = {CLIENT_ALIASES.get(name, name) for name in args.client}
     if wanted:
         chosen = [t for t in targets if t.client in wanted and (t.detected or t.label == CLIENT_LABELS[t.client])]
     else:
@@ -847,10 +861,12 @@ def setup_main(argv: list[str] | None = None, *, home: Home | None = None, io: I
         _say(io, "  Found: " + ", ".join(t.label for t in chosen))
         _say(io, "  Not changed (no terminal to ask in). Run again with --yes, or --client <name>.")
         chosen = []
-    written = []
+    written: list[Target] = []
+    tried: list[Target] = []
     for target in chosen:
         if interactive and not wanted and not _yes(f"  Add research-mcp to {target.label}?", io.input):
             continue
+        tried.append(target)
         plan = plan_target(target, launch, which=which)
         where = str(target.path) if target.path else "claude CLI"
         if plan.action == "refused":
@@ -873,7 +889,7 @@ def setup_main(argv: list[str] | None = None, *, home: Home | None = None, io: I
             continue
         try:
             _say(io, f"  {target.label}: {apply_plan(plan, run=run)}")
-            written.append(target.label)
+            written.append(target)
             if plan.dropped:
                 _say(io, f"    dropped from the old research entry: {', '.join(plan.dropped)} (kept in the .bak)")
         except (SetupRefused, OSError, subprocess.SubprocessError) as exc:
@@ -884,14 +900,22 @@ def setup_main(argv: list[str] | None = None, *, home: Home | None = None, io: I
     if zotero is not None and zotero.status == "fail":
         _say(io, f"\n[FAIL] Zotero: {zotero.detail}")
         if written:
-            _say(io, f"  The client configs were written ({', '.join(written)}); Zotero only has to be"
+            labels = ", ".join(t.label for t in written)
+            _say(io, f"  The client configs were written ({labels}); Zotero only has to be"
                      " started (with its local API on), no need to run setup again.")
         if zotero.fix:
             _say(io, f"  fix: {zotero.fix}")
     if not args.dry_run:
         _say(io, "\nNext: restart your MCP client (quit it fully, then open it again) and ask it to")
         _say(io, "'list the research tools'. `research-mcp doctor` checks the install later.")
-        _say(io, "ChatGPT has no local setup: run `research-mcp chatgpt` and paste the URL it prints.")
+        app = chatgpt_app_installed(home)
+        if any(t.client == "codex" for t in written) and (app or "chatgpt" in args.client):
+            _say(io, "ChatGPT app: quit it from the tray and open it again, then type /mcp in a chat to see")
+            _say(io, "research. If a chat doesn't show the research tools, use a Codex chat.")
+        elif app and not any(t.client == "codex" for t in tried):
+            _say(io, "The ChatGPT app is installed: `research-mcp setup --client chatgpt` adds research-mcp to it.")
+        if not app:
+            _say(io, "ChatGPT on the web: run `research-mcp chatgpt` and paste the URL it prints.")
     return 1 if failed else 0
 
 
@@ -920,6 +944,9 @@ def doctor_main(argv: list[str] | None = None, *, home: Home | None = None, out=
         print(f"  {label}: {where}", file=out)
     if not entries:
         print("  none (run `research-mcp setup`)", file=out)
+    if chatgpt_app_installed(home) and not any(label == CLIENT_LABELS["codex"] for label, _ in entries):
+        print("  The ChatGPT app is installed: `research-mcp setup --client chatgpt` adds research-mcp to it.",
+              file=out)
     return 1 if any(check.status == "fail" for check in checks) else 0
 
 

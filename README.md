@@ -16,6 +16,25 @@ edit is checked before it is saved, keeps your formatting, and can be undone in 
 
 Claude Desktop sets up Python and everything else itself.
 
+### ChatGPT app
+
+1. Download `research-mcp-install.cmd` from the [latest release](https://github.com/Russell-Day/research-mcp/releases/latest)
+   and double-click it (or paste the prompt from [Ask your AI to install it](#ask-your-ai-to-install-it) into
+   the app). It installs [uv](https://docs.astral.sh/uv/) if needed and runs setup.
+2. Quit the ChatGPT app from the system tray and open it again.
+3. Type `/mcp` in a chat: `research` is in the list.
+
+On Windows some ChatGPT chats don't show local tools yet; if yours doesn't, use a Codex chat in the same app.
+
+### Ask your AI to install it
+
+Paste this into the ChatGPT or Codex app, Claude Code, Cursor or any assistant that can run commands on
+your PC:
+
+```text
+Install the research-mcp MCP server for me: follow https://github.com/Russell-Day/research-mcp/blob/main/llms-install.md
+```
+
 ### Everyone else (one command)
 
 Install [uv](https://docs.astral.sh/uv/) if you don't have it (PowerShell):
@@ -31,8 +50,10 @@ uvx research-mcp setup
 ```
 
 Setup checks Word and Zotero, asks for an optional Zotero write key, and offers to add the server to
-each MCP client it finds: Claude Desktop, Claude Code, Codex, Cursor and VS Code. It backs up every
-file it changes (`<file>.bak`) and keeps your other servers. Restart the client afterwards.
+each MCP client it finds: Claude Desktop, Claude Code, the ChatGPT app and Codex (they share one config),
+Cursor and VS Code. It backs up every file it changes (`<file>.bak`) and keeps your other servers. Restart
+the client afterwards. `research-mcp-install.cmd` from the [latest release](https://github.com/Russell-Day/research-mcp/releases/latest)
+does the same with a double-click.
 
 Useful options:
 
@@ -41,7 +62,7 @@ Useful options:
 | `uvx research-mcp setup --print` | print the config entry for every client, change nothing |
 | `uvx research-mcp setup --dry-run` | show what setup would change, change nothing |
 | `uvx research-mcp setup --yes` | no questions: add to every client found |
-| `uvx research-mcp setup --client cursor` | only this client (`claude-desktop`, `claude-code`, `codex`, `cursor`, `vscode`) |
+| `uvx research-mcp setup --client cursor` | only this client (`claude-desktop`, `claude-code`, `chatgpt`, `codex`, `cursor`, `vscode`) |
 
 By hand, the server entry is just `uvx research-mcp` (stdio). For example, in a `mcpServers` file:
 
@@ -49,9 +70,10 @@ By hand, the server entry is just `uvx research-mcp` (stdio). For example, in a 
 { "mcpServers": { "research": { "command": "uvx", "args": ["research-mcp"] } } }
 ```
 
-### ChatGPT
+### ChatGPT on the web
 
-ChatGPT only reaches MCP servers on a public HTTPS address, so it has its own command. With
+The [ChatGPT app](#chatgpt-app) runs research-mcp on your PC and needs none of this. ChatGPT on the web
+only reaches MCP servers on a public HTTPS address, so it has its own command. With
 [uv](https://docs.astral.sh/uv/) installed (see above), run:
 
 ```powershell
@@ -78,8 +100,8 @@ full MCP with write tools is for Business and Enterprise/Edu; Pro gets read/fetc
   For a fixed address, run your own tunnel or reverse proxy to a fixed port and pass it:
   `uvx research-mcp chatgpt --port 8765 --url https://research.example.com` (https only: the URL holds the
   password).
-- `--read-only` exposes only the tools that read (inspect, audit, search Zotero; no page renders, since those
-  write image files): a good start. Nothing on disk or in Zotero can be changed, but the tools can still read any
+- `--read-only` exposes only the tools that read (inspect, audit, search Zotero; no page renders or PDF exports,
+  since those write files): a good start. Nothing on disk or in Zotero can be changed, but the tools can still read any
   .docx on this PC (set `RESEARCH_MCP_ROOT_DIR` to limit them to one folder).
 - Cloudflare ends a request after about 100 seconds, so a very long tool call (rendering a big document) can
   fail through the tunnel; run it again or render fewer pages.
@@ -90,18 +112,33 @@ full MCP with write tools is for Business and Enterprise/Edu; Pro gets read/fetc
 |---|---|
 | `inspect_document` | paragraphs, tables, comments, revisions and the document's `sha256`; `search_text` finds a passage |
 | `audit_document` | read-only package check, including whether Zotero citations can be added |
-| `edit_document` | text, paragraph, table-row and section edits; tracked changes (add, accept, reject); Word comments (add, reply, resolve) |
+| `edit_document` | text, paragraph, table-row and section edits; a Track Changes switch so text edits land as tracked changes; accept and reject tracked changes; Word comments (add, reply, resolve) |
 | `list_revisions`, `list_bookmarks` | read tracked changes and bookmarks |
 | `undo_document`, `checkpoint_document`, `document_history`, `revert_document` | undo any edit in one call, name a point to return to |
+| `edit_feedback` | what the user did with the assistant's earlier edits (accepted, rejected, reworded), newest first, so it learns the author's style |
 | `search_zotero`, `list_collections`, `set_project_collection` | search your Zotero library, pin a folder to a collection |
 | `insert_zotero_citation` | insert a live Zotero citation (Zotero's own field, so the Zotero Word plugin keeps working) |
 | `edit_citation_cluster` | change which references one citation cites |
+| `edit_document` op `delete_citation` | remove one whole citation as a tracked deletion; names the references that leave the bibliography |
+| `edit_document` op `delete_paragraph` | delete whole paragraphs (blank lines too, in the body or a table cell), tracked or plain |
+| `edit_document` op `format_paragraph` | font, size, indents, spacing or list numbering of whole paragraphs (or match another paragraph), tracked or plain |
 | `refresh_citations` | re-render all citations and the bibliography through Zotero |
 | `add_zotero_item_by_doi`, `update_zotero_item` | add a reference by DOI, fix a reference's details (needs a [write key](#zotero-write-key)) |
 | `format_tables`, `clean_bookmarks` | table layout, remove stray bookmarks |
 | `audit_document_style`, `style_text`, `apply_document_style` | check emphasis, bold/italic one phrase, apply a typography preset |
 | `render_document_pages` | page images (PNG) to check layout (needs `pdftoppm` from Poppler or MiKTeX) |
+| `export_pdf` | save a PDF beside the .docx (or at `output`); never overwrites a file, never changes the .docx |
+| `convert_document` | save a Word 97-2003 .doc as a new .docx beside it (or at `output`); never overwrites a file, never changes the .doc |
 | `report_issue` | a ready-to-file GitHub issue link |
+
+**Tracked edits.** Turn tracking on once per document with `edit_document(track_changes=true, ...)` (or the
+op `set_track_changes`). From then on text edits, new and deleted paragraphs, table rows and sections
+rewritten (rows added or removed included), new tables, citations deleted or inserted land as Word tracked changes by
+"Claude" (or the `author` you set), for anyone opening the file, a copy included. Document styling and table
+formatting are recorded with Word's own Track Changes under the same author; what Word can't track (a cell merge,
+page margins Word didn't record) is applied and gets a Word comment saying what changed. Bookmark cleanup can't be
+tracked yet: it says so and runs only with `tracked: false`. The older `tracked_replace_text`/`tracked_replace_paragraph` ops still
+work as aliases. `find` and `anchor` can be up to 5000 characters long.
 
 Every write needs the `sha256` from the last read, so it never edits a version it hasn't seen. A
 document open in Word is refused (save and close it first); the tools never touch the Word window you
@@ -141,7 +178,25 @@ API, then Zotero syncs the change to your desktop library).
 | `ZOTERO_MCP_CONTACT_EMAIL` | your email, sent to CrossRef and Unpaywall when adding by DOI so an open-access PDF can be attached (optional; see [Privacy](#privacy)) |
 | `RESEARCH_MCP_ROOT_DIR` | limit the tools to documents inside this folder (default: anywhere) |
 | `RESEARCH_MCP_REMOTE_TOKEN` | the secret in the `research-mcp chatgpt` URL (made on first run) |
+| `RESEARCH_MCP_FEEDBACK_DIR` | where edit feedback goes (default `~/research_mcp/edit_feedback`; not inside OneDrive) |
 | `RESEARCH_MCP_LOG_DIR` | where the local tool-call log goes (default `%LOCALAPPDATA%\research_mcp\logs`) |
+
+## Running from a git checkout
+
+If you run the server from a git clone over HTTP under a supervisor that restarts it when it exits (a
+`:loop` in a `.cmd` file, a service manager), `--exit-when-stale` lets it pick up new commits by itself:
+
+```powershell
+uv run python -m research_mcp.server --transport streamable-http --port 8000 --exit-when-stale
+```
+
+Once a minute it checks the clone. It exits with code **75** when `master` has new commits that change
+`src/`, `pyproject.toml` or `uv.lock`, those files in the working tree match the commit (uncommitted work is
+never loaded), and no tool call has started or finished for `--stale-idle-seconds` (default 300).
+`--idle-log <file>` also waits until that file (e.g. the supervisor's log) is that old. When the new commits
+change the Word worker's code, the worker is asked to shut down first (a busy worker postpones the exit by a
+minute). Each exit is appended to `restarts.jsonl` in `%LOCALAPPDATA%\research_mcp` and written as one line
+to stderr. The flag is ignored under stdio, and git errors or timeouts just skip that minute's check.
 
 ## Troubleshooting
 
@@ -180,6 +235,10 @@ Tool calls are logged on your PC only, in `%LOCALAPPDATA%\research_mcp\logs\mcp_
 result, so it contains text from your documents and Zotero items. At 20 MB the log moves to
 `mcp_traffic.1.jsonl` (replacing the older one), so it never takes more than about 40 MB. `report_issue`
 notes go to `ISSUES.md` in the same folder. Delete the folder at any time.
+
+Edit feedback (`edit_feedback`) keeps, per document, the short spans the assistant changed and what you
+kept, in `~/research_mcp/edit_feedback` (change it with `RESEARCH_MCP_FEEDBACK_DIR`; never inside OneDrive):
+a `.jsonl` log and a readable `.md`. It is never pruned; delete the files at any time.
 
 ## License
 

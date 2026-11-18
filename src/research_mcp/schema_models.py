@@ -6,6 +6,18 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class FeedbackFields(BaseModel):
+    """Edit feedback (plan 829) carried by per-document tool results; both absent unless there is news."""
+
+    edit_feedback: str | None = Field(
+        default=None,
+        description="One line, only when the user decided model edits since the model last heard: e.g. 'Since "
+                    "your last edit: 2 accepted, 1 rejected, 1 reworded (3 pending). Call edit_feedback for "
+                    "details.'")
+    feedback_warning: str | None = Field(
+        default=None, description="Edit feedback could not be recorded; the tool itself succeeded.")
+
+
 class MCPMergeSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -29,7 +41,7 @@ class MCPTableFormatSpec(BaseModel):
     )
 
 
-class AuditDocumentResult(BaseModel):
+class AuditDocumentResult(FeedbackFields):
     path: str
     sha256: str
     body_text_sha256: str
@@ -56,9 +68,13 @@ class AuditDocumentResult(BaseModel):
     is_locked: bool = False
     lock_reason: str | None = None
     citation_readiness: dict[str, Any] | None = None
+    track_changes: dict[str, Any] | None = Field(
+        default=None,
+        description="Plan 864: research-mcp's tracking switch {on, author} (set_track_changes); not Word's own "
+        "Track Changes setting. author is null when the switch was never set.")
 
 
-class InspectDocumentResult(BaseModel):
+class InspectDocumentResult(FeedbackFields):
     path: str
     source_sha256: str
     is_locked: bool = False
@@ -87,13 +103,17 @@ class InspectDocumentResult(BaseModel):
         default=None,
         description="Characters edit_document's sweep_characters would clean: {total, by_codepoint: "
         "{'U+00A0': {name, action, count}}, skipped_total, skipped}; math, fields and existing revisions excluded.")
+    track_changes: dict[str, Any] | None = Field(
+        default=None,
+        description="Plan 864: research-mcp's tracking switch {on, author} (set_track_changes); not Word's own "
+        "Track Changes setting. author is null when the switch was never set.")
 
 
-class ListBookmarksResult(BaseModel):
+class ListBookmarksResult(FeedbackFields):
     bookmarks: list[dict[str, Any]]
 
 
-class CleanBookmarksResult(BaseModel):
+class CleanBookmarksResult(FeedbackFields):
     source: str
     source_sha256: str
     output: str
@@ -105,9 +125,10 @@ class CleanBookmarksResult(BaseModel):
     sha256_before: str | None = None
     sha256_after: str | None = None
     publish_warning: str | None = None
+    size_growth: dict | None = None
 
 
-class FormatTablesResult(BaseModel):
+class FormatTablesResult(FeedbackFields):
     source: str
     source_sha256: str
     output: str
@@ -118,9 +139,10 @@ class FormatTablesResult(BaseModel):
     sha256_before: str | None = None
     sha256_after: str | None = None
     publish_warning: str | None = None
+    size_growth: dict | None = None
 
 
-class InsertCitationResult(BaseModel):
+class InsertCitationResult(FeedbackFields):
     source: str
     source_sha256: str
     output: str
@@ -131,13 +153,24 @@ class InsertCitationResult(BaseModel):
     item_keys: list[str]
     rendered_citation_text: str
     zotero_field_count: int
+    tracking: str = "off"
+    tracking_author: str | None = None
+    revision_id: str | None = None
+    revisions_checked: int | None = None
+    revision_check: dict[str, Any] = Field(
+        default_factory=dict,
+        description="How every tracked revision compared before the insert and after Word's save and the Zotero "
+        "refresh (word_merged: touching revisions Word's save merged into one).",
+    )
+    warnings: list[str] = Field(default_factory=list)
     undo_token: str | None = None
     sha256_before: str | None = None
     sha256_after: str | None = None
     publish_warning: str | None = None
+    size_growth: dict | None = None
 
 
-class EditCitationClusterResult(BaseModel):
+class EditCitationClusterResult(FeedbackFields):
     success: bool
     source: str
     source_sha256: str
@@ -155,13 +188,15 @@ class EditCitationClusterResult(BaseModel):
     revision_check: dict[str, Any] = Field(
         default_factory=dict,
         description="How every tracked revision compared before the edit and after Word's save: "
-        "level byte_identical or serialization_only (rsid/attribute order/proofing markers only).",
+        "level byte_identical or serialization_only (rsid/attribute order/proofing markers only); "
+        "word_merged counts touching revisions Word's save merged into one.",
     )
     warnings: list[str] = Field(default_factory=list)
     undo_token: str | None = None
     sha256_before: str | None = None
     sha256_after: str | None = None
     publish_warning: str | None = None
+    size_growth: dict | None = None
 
 
 class BibliographyEntryChange(BaseModel):
@@ -191,7 +226,7 @@ class CitationChange(BaseModel):
     after: str
 
 
-class RefreshCitationsResult(BaseModel):
+class RefreshCitationsResult(FeedbackFields):
     success: bool
     preview: bool = Field(description="True: the refresh ran on a temporary copy that was discarded; nothing written.")
     source: str
@@ -218,9 +253,20 @@ class RefreshCitationsResult(BaseModel):
     sha256_before: str | None = None
     sha256_after: str | None = None
     publish_warning: str | None = None
+    size_growth: dict | None = None
 
 
-class UndoDocumentResult(BaseModel):
+class SetCitationStyleResult(RefreshCitationsResult):
+    style: dict[str, Any] = Field(description="The installed style used: style_id, short_name, title, style_class, "
+                                  "has_bibliography, file, parent.")
+    style_before: dict[str, Any] = Field(description="The document's Zotero style before: style_id, locale, ...")
+    style_after: dict[str, Any] = Field(description="The document's Zotero style read back after the refresh.")
+    session_renewed: bool = False
+    prefs_chunks_before: int = 0
+    prefs_chunks_after: int = 0
+
+
+class UndoDocumentResult(FeedbackFields):
     path: str
     restored: bool
     undo_token: str | None = Field(
@@ -231,6 +277,7 @@ class UndoDocumentResult(BaseModel):
     sha256_before: str
     sha256_after: str
     publish_warning: str | None = None
+    size_growth: dict | None = None
     sha256: str
     undid: dict[str, Any] | None = None
     forced: bool = False
@@ -244,7 +291,7 @@ class RevertDocumentResult(UndoDocumentResult):
     """revert_document is an alias of undo_document(path)."""
 
 
-class CheckpointDocumentResult(BaseModel):
+class CheckpointDocumentResult(FeedbackFields):
     path: str
     checkpoint: str
     label: str
@@ -253,7 +300,7 @@ class CheckpointDocumentResult(BaseModel):
     message: str
 
 
-class DocumentHistoryResult(BaseModel):
+class DocumentHistoryResult(FeedbackFields):
     path: str
     sha256: str
     entries: list[dict[str, Any]]
@@ -336,7 +383,7 @@ class ReportIssueResult(BaseModel):
     issue_body: str | None = None
 
 
-class ApplyStyleResult(BaseModel):
+class ApplyStyleResult(FeedbackFields):
     source: str
     source_sha256: str
     output: str
@@ -350,11 +397,44 @@ class ApplyStyleResult(BaseModel):
     sha256_before: str | None = None
     sha256_after: str | None = None
     publish_warning: str | None = None
+    size_growth: dict | None = None
 
 
-class RenderDocumentResult(BaseModel):
+class RenderDocumentResult(FeedbackFields):
     source: str
     output_directory: str
     total_rendered: int
     dpi: int
     pages: list[dict[str, Any]]
+    markup: bool = False
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ExportPdfResult(FeedbackFields):
+    source: str
+    source_sha256: str
+    output: str
+    size_bytes: int
+    page_count: int | None
+    revision_count: int
+    comment_count: int
+    warnings: list[str]
+    elapsed_seconds: float
+
+
+class EditFeedbackResult(BaseModel):
+    """Net outcomes of model edits (plan 829). Items are one line each, at most 300 characters."""
+
+    path: str | None = None
+    scope: str = "document"
+    items: list[str] = Field(default_factory=list, description="Newest first: [chain id] where outcome (rounds): \"original\" → proposed \"…\" → kept \"…\".")
+    counts: dict[str, int] = Field(default_factory=dict, description="Decided chains by outcome.")
+    pending: int = Field(default=0, description="Open proposals the user has not decided yet (counted, not listed).")
+    more: int = Field(default=0, description="Matching items not shown (raise limit or filter).")
+    note: str | None = None
+    record_id: str | None = None
+    rounds: list[str] | None = Field(default=None, description="detail='rounds': every round of record_id.")
+    folder: str | None = None
+    md_path: str | None = Field(default=None, description="The readable .md log of this document.")
+    edit_feedback: str | None = None
+    feedback_warning: str | None = None

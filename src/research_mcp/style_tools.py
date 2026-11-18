@@ -11,17 +11,30 @@ from .operation_process import run_operation
 from .word import staged_document
 
 
-def style_text(source: str, source_sha256: str, paragraph_index: int, text: str, *, bold: bool | None = None, italic: bool | None = None, output: str | None = None, preview_only: bool = True, allow_whole_paragraph: bool = False) -> dict:
+def style_text(source: str, source_sha256: str, paragraph_index: int, text: str, *, bold: bool | None = None, italic: bool | None = None, output: str | None = None, preview_only: bool = True, allow_whole_paragraph: bool = False, tracked: bool | None = None, author: str | None = None) -> dict:
     path = Path(source).resolve(strict=True)
     audit = audit_docx(path)
     if source_sha256.upper() != audit.sha256:
         raise RefusedUnsafe("Source changed; inspect again and supply the current source_sha256")
     if audit.is_locked:
         raise RefusedUnsafe("Source is locked; save and close it, then inspect again")
-    if audit.structural_errors or audit.revision_count:
-        raise RefusedUnsafe("Resolve structural errors or tracked revisions before inline styling")
+    if audit.structural_errors:
+        raise RefusedUnsafe("Resolve structural errors before inline styling")
     if bold is None and italic is None:
         raise RefusedUnsafe("Specify bold and/or italic; omitted properties stay unchanged")
+    # Plan 864 S6: tracked (the switch when not given) or a document with any revision -> direct XML
+    # (tracked_format; Word never opens, every other revision stays byte-identical). Otherwise Word, as before.
+    from .revisions import revision_count
+    from .track_setting import DEFAULT_AUTHOR, read_setting
+
+    setting = read_setting(path)
+    use_tracked = bool(tracked) if tracked is not None else setting.on
+    who = ((author or "").strip() or setting.author or DEFAULT_AUTHOR) if use_tracked else None
+    tracking = {"tracking": "on", "tracking_author": who} if use_tracked else {"tracking": "off"}
+    if use_tracked or revision_count(path):
+        return _style_direct(path, audit.sha256, paragraph_index, text, bold=bold, italic=italic, output=output,
+                             preview_only=preview_only, allow_whole_paragraph=allow_whole_paragraph,
+                             tracked=use_tracked, author=who, tracking=tracking)
     paragraphs = read_paragraphs(path)
     if not 1 <= paragraph_index <= len(paragraphs):
         raise RefusedUnsafe("Paragraph index is outside the document; inspect again")
@@ -40,6 +53,7 @@ def style_text(source: str, source_sha256: str, paragraph_index: int, text: str,
         "characters_selected": len(text), "has_fields": target.has_fields,
         "field_overlap_check": "performed in Word before mutation" if target.has_fields else "no fields in this paragraph",
         "next_step": "If this matches the authorized edit, call with preview_only=False and the same SHA. No user reconfirmation is required for an already-authorized edit.",
+        "engine": "word", "tracked": False, "author": None, **tracking,
     }
     if preview_only:
         return plan
@@ -55,6 +69,44 @@ def style_text(source: str, source_sha256: str, paragraph_index: int, text: str,
             after = audit_docx(candidate)
             os.replace(candidate, stage)
     return {**plan, "status": "complete", "output": str(destination), "output_sha256": after.sha256, "verification": {key: result[key] for key in ("saved_state_verified", "field_instructions_unchanged", "verified_properties", "verification_note") if key in result}, "next_step": "Inspect formatting with audit_document_style; render if visual layout matters."}
+
+
+def _style_direct(path: Path, sha256: str, paragraph_index: int, text: str, *, bold, italic, output, preview_only: bool,
+                  allow_whole_paragraph: bool, tracked: bool, author: str | None, tracking: dict) -> dict:
+    """The direct-XML style_text (tracked_format): preview, or apply in the same staged, verified publication
+    as the Word path (in place: checkpointed, undo_token; versioned: a new file)."""
+
+    from . import tracked_format
+
+    kwargs = {"paragraph_index": paragraph_index, "text": text, "bold": bold, "italic": italic, "tracked": tracked,
+              "author": author, "allow_whole_paragraph": allow_whole_paragraph}
+    shown = tracked_format.preview(path, **kwargs)
+    plan = {
+        "status": "preview", "source": str(path), "source_sha256": sha256, "paragraph_index": paragraph_index,
+        "selected_text": shown["selected_text"], "context_before": shown["context_before"],
+        "context_after": shown["context_after"], "scope": shown["scope"],
+        "requested": {key: value for key, value in {"bold": bold, "italic": italic}.items() if value is not None},
+        "characters_selected": len(shown["selected_text"]),
+        "engine": "direct_xml", "tracked": tracked, "author": author if tracked else None, **tracking,
+        "runs_to_style": shown["runs_to_style"], "revisions_to_add": shown["revisions_to_add"],
+        "styled_in_place": shown["styled_in_place"],
+        "next_step": "If this matches the authorized edit, call with preview_only=False and the same SHA. No user reconfirmation is required for an already-authorized edit.",
+    }
+    if preview_only:
+        return plan
+    destination = Path(output).resolve() if output else path
+    with staged_document(path, destination) as stage:
+        if audit_docx(stage).sha256 != sha256:
+            raise RefusedUnsafe("Source changed while staging; inspect again")
+        with tempfile.TemporaryDirectory(prefix="research-mcp-inline-", dir=stage.parent) as temporary:
+            candidate = Path(temporary) / "candidate.docx"
+            result = tracked_format.style_runs(stage, candidate, **kwargs)
+            after = audit_docx(candidate)
+            os.replace(candidate, stage)
+    return {**plan, "status": "complete", "output": str(destination), "output_sha256": after.sha256,
+            "revisions_added": result.get("revisions_added", []), "styled_in_place": result.get("styled_in_place", []),
+            "runs_styled": result.get("runs_styled"),
+            "next_step": "Check the paragraph with inspect_document or list_revisions; render if layout matters."}
 
 
 def plan_document_style(path: str, profile: str, emphasis_policy: str) -> dict:

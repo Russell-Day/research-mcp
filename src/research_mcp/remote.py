@@ -484,7 +484,8 @@ class WordWarmup:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="research-mcp chatgpt",
-        description="Serve the research tools to ChatGPT: HTTP on this PC plus a public tunnel address.",
+        description="Serve the research tools to ChatGPT on the web: HTTP on this PC plus a public tunnel address. "
+                    "The ChatGPT desktop app needs none of this: run `research-mcp setup` instead.",
     )
     parser.add_argument("--url", metavar="HTTPS_BASE",
                         help="your own stable public address that forwards to --port (named Cloudflare tunnel, "
@@ -519,17 +520,22 @@ def chatgpt_main(argv: list[str] | None = None, *, out=None, err=None,
                  tunnel_factory: Callable[[Path, int], Tunnel] | None = None,
                  server_factory: Callable[[Any, int], HttpServer] | None = None,
                  clipboard: Callable[[str], bool] = _copy_to_clipboard,
+                 app_installed: Callable[[], bool] | None = None,
                  poll: float = 0.5) -> int:
     args = _parser().parse_args(argv)
     out = out or sys.stdout
     err = err or sys.stderr
     from . import config
-    from .setup_cmd import _quiet_encoding_errors
+    from .setup_cmd import Home, _quiet_encoding_errors, chatgpt_app_installed
 
     _quiet_encoding_errors()
 
     def say(text: str = "") -> None:
         print(text, file=out, flush=True)
+
+    if (app_installed or (lambda: chatgpt_app_installed(Home.from_env())))():
+        say("The ChatGPT app can use research-mcp directly: run `research-mcp setup`. "
+            "This command is for ChatGPT on the web.")
 
     if args.url and args.no_tunnel:
         print("research-mcp chatgpt: --url and --no-tunnel don't go together", file=err)

@@ -12,7 +12,12 @@ import sys
 import time
 
 from .errors import IntegrationBusy
-from .processes import process_identity_matches
+from .processes import (
+    IDENTITY_GONE,
+    process_identity_matches,
+    process_identity_status,
+    terminate_process_identity,
+)
 
 
 # A ping must outlast ordinary COM latency but must not wait behind a
@@ -64,6 +69,44 @@ def worker_state_is_live(state: dict | None) -> bool:
         return False
 
 
+def worker_word_is_dead(state: dict | None) -> bool:
+    """True only when the state names its Word process and that process is confirmed gone.
+
+    A state without a Word identity (missing or unreadable fields), or a Word
+    process that cannot be inspected (access denied, a failed query), is never
+    judged dead: recycling must not hit a worker whose Word may still be fine.
+    """
+
+    if not state:
+        return False
+    try:
+        word_pid = int(state["word_pid"])
+        word_created = int(state["word_process_created"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return process_identity_status(word_pid, word_created) == IDENTITY_GONE
+
+
+def _recycle_orphaned_worker(state: dict) -> None:
+    """Stop a worker whose Word process died, so a fresh one can start.
+
+    Such a worker still answers pings, but every COM call fails with "The RPC
+    server is unavailable", and a graceful shutdown cannot succeed (it asks
+    Word for its open documents). Word is already gone, so nothing is lost.
+    """
+
+    stopped = terminate_process_identity(int(state["pid"]), int(state["process_created"]))
+    if not stopped:
+        raise IntegrationBusy(
+            f"the Word worker {state['pid']} lost its Word process {state['word_pid']} "
+            "and could not be stopped; explicit recovery is required"
+        )
+    # The terminated worker never ran its own cleanup; remove its state only if
+    # it is still the one we read (a new worker may already have replaced it).
+    if read_worker_state() == state:
+        worker_state_path().unlink(missing_ok=True)
+
+
 def _request_from_state(state: dict, payload: dict, *, timeout: float | None = None) -> dict:
     connection = Client(state["pipe"], family="AF_PIPE", authkey=bytes.fromhex(state["authkey"]))
     try:
@@ -89,15 +132,21 @@ def _request_from_state(state: dict, payload: dict, *, timeout: float | None = N
 
 def ensure_word_worker(*, timeout: float = 25.0) -> dict:
     state = read_worker_state()
+    if worker_state_is_live(state) and worker_word_is_dead(state):
+        _recycle_orphaned_worker(state)
+        state = read_worker_state()
     if worker_state_is_live(state):
         try:
             _request_from_state(state, {"command": "ping"}, timeout=PING_TIMEOUT)
             return state
         except Exception as exc:
-            raise IntegrationBusy(
-                "the recorded Word worker is alive but not responding; explicit recovery is required"
-            ) from exc
-    worker_state_path().unlink(missing_ok=True)
+            if not worker_word_is_dead(state):
+                raise IntegrationBusy(
+                    "the recorded Word worker is alive but not responding; explicit recovery is required"
+                ) from exc
+            _recycle_orphaned_worker(state)
+    if read_worker_state() == state:
+        worker_state_path().unlink(missing_ok=True)
     authkey = secrets.token_hex(32)
     startupinfo = None
     if sys.platform == "win32":
@@ -136,6 +185,10 @@ def shutdown_word_worker() -> dict:
     if not worker_state_is_live(state):
         worker_state_path().unlink(missing_ok=True)
         return {"ok": True, "running": False, "stale_state_removed": True}
+    if worker_word_is_dead(state):
+        # A graceful shutdown asks Word for its documents and cannot succeed.
+        _recycle_orphaned_worker(state)
+        return {"ok": True, "running": False, "orphaned_worker_stopped": True}
     response = _request_from_state(state, {"command": "shutdown"}, timeout=PING_TIMEOUT)
     deadline = time.monotonic() + 25.0
     while time.monotonic() < deadline and worker_state_is_live(state):

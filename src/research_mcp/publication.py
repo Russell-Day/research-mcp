@@ -24,6 +24,7 @@ import uuid
 from . import checkpoints as ck
 from .audit import is_file_locked
 from .checkpoints import Refusal, file_sha256
+from .package_size import size_growth
 
 # ---------------------------------------------------------------- what a tool call published
 #
@@ -61,21 +62,43 @@ def note_write(record: dict) -> dict:
     return record
 
 
-def note_versioned(source_sha256: str, output: Path) -> dict:
-    """A versioned write (output != source): the source is untouched, so there is nothing to undo."""
-    return note_write({"path": str(Path(output).resolve()), "undo_token": None, "versioned": True,
-                       "sha256_before": source_sha256.upper(), "sha256_after": file_sha256(output).upper()})
+def _edit_feedback(target: Path, before_file: Path | None, sha_before: str, sha_after: str,
+                   undo_token: str | None, op: str | None, op_types: str | None = None) -> dict:
+    """Plan 829: record this write's proposals (and outcomes it implies) in the edit-feedback log. Never raises;
+    returns ``edit_feedback`` / ``feedback_warning`` for the publication record."""
+    if before_file is None or Path(target).suffix.lower() != ".docx":
+        return {}
+    from .edit_feedback_word import after_publish
+
+    return after_publish(target, before_file=before_file, sha_before=sha_before, sha_after=sha_after,
+                         undo_token=undo_token, tool=_current("tool"), op=op or _current("op"), op_types=op_types)
+
+
+def note_versioned(source_sha256: str, output: Path, source: Path | None = None, *,
+                   op_types: str | None = None) -> dict:
+    """A versioned write (output != source): the source is untouched, so there is nothing to undo.
+    ``source``, when given, is compared with ``output`` for ``size_growth`` and is the "before" state for
+    edit feedback (the proposals are recorded against the new file)."""
+    sha_after = file_sha256(output)
+    record = {"path": str(Path(output).resolve()), "undo_token": None, "versioned": True,
+              "sha256_before": source_sha256.upper(), "sha256_after": sha_after.upper(),
+              "size_growth": size_growth(source, output) if source is not None else None}
+    record.update(_edit_feedback(Path(output).resolve(), Path(source) if source is not None else None,
+                                 source_sha256.lower(), sha_after, None, None, op_types))
+    return note_write(record)
 
 
 def write_fields(records: list, sha256_before: str | None = None, sha256_after: str | None = None) -> dict:
-    """undo_token / sha256_before / sha256_after / publish_warning for a tool result: the last publication,
-    else the given pair."""
+    """undo_token / sha256_before / sha256_after / publish_warning / size_growth for a tool result: the last
+    publication, else the given pair."""
     if records:
         rec = records[-1]
         return {"undo_token": rec["undo_token"], "sha256_before": rec["sha256_before"],
-                "sha256_after": rec["sha256_after"], "publish_warning": rec.get("publish_warning")}
+                "sha256_after": rec["sha256_after"], "publish_warning": rec.get("publish_warning"),
+                "size_growth": rec.get("size_growth")}
     return {"undo_token": None, "sha256_before": sha256_before.upper() if sha256_before else None,
-            "sha256_after": sha256_after.upper() if sha256_after else None, "publish_warning": None}
+            "sha256_after": sha256_after.upper() if sha256_after else None, "publish_warning": None,
+            "size_growth": None}
 
 
 # ---------------------------------------------------------------- publish
@@ -231,14 +254,15 @@ def _commit(target: Path, txid: str, sha_after: str, warnings: list | None = Non
 
 
 def publish_inplace(staged: Path, target: Path, *, expected_sha256: str, tool: str | None = None,
-                    op: str | None = None) -> dict:
+                    op: str | None = None, op_types: str | None = None) -> dict:
     """Replace ``target`` with ``staged`` if ``target`` still has ``expected_sha256``.
 
     The pre-edit state is stored and verified in the checkpoint store first (refused ``store_full`` when it
     cannot fit, ``wrong_sha`` when the document changed, ``doc_open`` when Word holds it, ``recovery_pending``
     while an earlier write on it could not be recorded yet). Returns
-    {"path", "undo_token", "sha256_before", "sha256_after"}; ``undo_token`` is None when the staged bytes
-    equal the source (nothing was written).
+    {"path", "undo_token", "sha256_before", "sha256_after", "publish_warning", "size_growth"}; ``undo_token``
+    is None when the staged bytes equal the source (nothing was written). ``size_growth`` is None unless the
+    package grew a lot (package_size.size_growth: which kinds of part grew, fonts Word newly embedded).
     """
     staged, target = Path(staged), Path(target).resolve()
     expected = expected_sha256.lower()
@@ -252,15 +276,21 @@ def publish_inplace(staged: Path, target: Path, *, expected_sha256: str, tool: s
             if sha_after == expected:
                 return note_write({"path": str(target), "undo_token": None, "sha256_before": expected.upper(),
                                    "sha256_after": expected.upper(), "publish_warning": None})
-            txid = ck.begin(target, {"kind": "edit", "tool": tool, "op": op, "sha_before": expected,
+            growth = size_growth(target, staged)  # before the swap: target still holds the source
+            txid = ck.begin(target, {"kind": "edit", "tool": tool, "op": op[:200] if op else op, "sha_before": expected,
                                      "sha_after": sha_after, "stored": True}, {expected: target})
             warnings = _publish(staged, target, expected, sha_after, txid)
             entry = _commit(target, txid, sha_after, warnings)
     except OSError as exc:
         raise Refusal("publish_failed", f"Could not safely publish {target.name}: {exc}. Original document was not "
                       "replaced. Check file access and free disk space, then inspect again.") from exc
-    return note_write({"path": str(target), "undo_token": entry["id"], "sha256_before": entry["sha_before"].upper(),
-                       "sha256_after": sha_after.upper(), "publish_warning": " ".join(warnings) or None})
+    record = {"path": str(target), "undo_token": entry["id"], "sha256_before": entry["sha_before"].upper(),
+              "sha256_after": sha_after.upper(), "publish_warning": " ".join(warnings) or None,
+              "size_growth": growth}
+    # outside the document lock: feedback reads the stored pre-edit state and the published file only
+    record.update(_edit_feedback(target, ck.blob_path(expected) if ck.has_blob(expected) else None, expected,
+                                 sha_after, entry["id"], op, op_types))
+    return note_write(record)
 
 
 # ---------------------------------------------------------------- checkpoint / undo / history

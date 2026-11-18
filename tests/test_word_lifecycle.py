@@ -265,9 +265,10 @@ def test_property_initialization_failure_closes_new_word_instance(monkeypatch):
 
 
 @pytest.mark.parametrize("operation", [
-    {"op_id": "r", "type": "replace_text", "paragraph_index": 1, "find": "x" * 256, "replace": "y"},
-    {"op_id": "i", "type": "insert_text", "paragraph_index": 1, "position": "after", "anchor": "x" * 256, "text": "y"},
+    {"op_id": "r", "type": "replace_text", "paragraph_index": 1, "find": "x" * 5001, "replace": "y"},
+    {"op_id": "i", "type": "insert_text", "paragraph_index": 1, "position": "after", "anchor": "x" * 5001, "text": "y"},
 ])
-def test_find_and_anchor_are_limited_to_word_search_length(operation):
-    with pytest.raises(ValueError, match="at most 255"):
+def test_find_and_anchor_are_capped_at_find_max(operation):
+    # Plan 864 decision 14: up to 5000 characters; Word's 255-character Find limit is handled in _locate.
+    with pytest.raises(ValueError, match="at most 5000"):
         EditDocumentRequest(source="x", source_sha256="0" * 64, operations=[operation])

@@ -44,6 +44,7 @@ from .cluster_ops import (
     apply_splices,
     body_fields,
     cluster_splices,
+    deleted_zotero_fields,
     item_key,
     refuse_unsafe_cluster,
 )
@@ -308,6 +309,14 @@ def plan_refresh_xml(xml: str, body: Node) -> tuple[str, list[Cluster], list[Clu
     reset: list[Cluster] = []
     kept: list[Cluster] = []
     bibliographies = 0
+    deleted = deleted_zotero_fields(xml, body)
+    if deleted:
+        # Their w:instrText alone reads as no field, so the loop below would skip them; Zotero still re-renders
+        # them (plan 924 S2).
+        raise RefusedUnsafe(
+            f"{OP}: {len(deleted)} Zotero field(s) have their field code in a tracked deletion, which the refresh "
+            f"can neither reset nor check: {'; '.join(deleted)}. Accept or reject the deletion first "
+            "(list_revisions shows it); nothing was written")
     for item in body_fields(xml, body):
         instruction = item.instruction(xml).strip()
         if instruction.startswith(_BIBL_PREFIX):

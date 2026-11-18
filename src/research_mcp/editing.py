@@ -97,10 +97,17 @@ def _insert_paragraph_after_body(document, index: int) -> None:
     instead. Both halves are the anchor's own paragraph, so both stay outside
     the table. Word does not merge the resulting adjacent tables; nesting was
     the entire defect.
+
+    The range is collapsed to that point first. On a range that still spans
+    the paragraph's content, `InsertParagraphAfter` raises Word's "Cannot edit
+    Range" when the content is an inline picture (BIOINF 527 PS2, 2026-11-08:
+    a paragraph holding only a drawing). The collapsed range inserts at the
+    same position, so prose paragraphs behave as before.
     """
 
     body = document.Paragraphs(index).Range.Duplicate
     body.End = body.End - 1
+    body.Collapse(_WD_COLLAPSE_END)
     body.InsertParagraphAfter()
 
 
@@ -138,8 +145,10 @@ def _field_spans(document, paragraph_index: int) -> list[tuple[int, int]]:
     return spans
 
 
-# Word's Find cannot search for more than 255 characters.
+# Word's Find cannot search for more than 255 characters; a longer find/anchor (up to edit_models.FIND_MAX)
+# is found by its first FIND_LIMIT characters and the range is then extended and checked in full (plan 864).
 FIND_LIMIT = 255
+LONG_FIND_CROSSES_FIELD = "find is {length} characters and crosses a field; use replace_paragraph with paragraph_index"
 _WD_FIND_STOP = 0
 _WD_COLLAPSE_END = 0
 _WD_COLLAPSE_START = 1
@@ -168,15 +177,7 @@ def add_comment_to_version(
     )
 
 
-def _locate(document, paragraph_index: int, find: str):
-    """Ask Word where the anchor is, rather than computing it.
-
-    Range positions and `Range.Text` offsets are different coordinate systems
-    once a field is present -- hidden field code occupies positions that the
-    text never shows -- so Word does this arithmetic, not this module.
-    """
-
-    search = document.Paragraphs(paragraph_index).Range
+def _find_in(search, find: str) -> bool:
     finder = search.Find
     finder.ClearFormatting()
     finder.Text = find
@@ -188,11 +189,58 @@ def _locate(document, paragraph_index: int, find: str):
     finder.MatchWholeWord = False
     finder.MatchSoundsLike = False
     finder.MatchAllWordForms = False
-    if not finder.Execute():
+    return bool(finder.Execute())
+
+
+def _locate(document, paragraph_index: int, find: str):
+    """Ask Word where the anchor is, rather than computing it.
+
+    Range positions and `Range.Text` offsets are different coordinate systems
+    once a field is present -- hidden field code occupies positions that the
+    text never shows -- so Word does this arithmetic, not this module.
+
+    Word's Find takes at most FIND_LIMIT characters. A longer `find` is
+    searched by its first FIND_LIMIT characters; each hit's range is extended
+    to the full length and kept only if its `Range.Text` equals `find`, and
+    every such match in the paragraph is counted (exactly one is required).
+    A prefix hit whose extension reads differently means hidden field code
+    sits inside the span: refused with LONG_FIND_CROSSES_FIELD.
+    """
+
+    if len(find) <= FIND_LIMIT:
+        search = document.Paragraphs(paragraph_index).Range
+        if not _find_in(search, find):
+            raise RefusedUnsafe(
+                f"Word could not find {find!r} in paragraph {paragraph_index}"
+            )
+        return search
+    paragraph = document.Paragraphs(paragraph_index).Range
+    start, end = int(paragraph.Start), int(paragraph.End)
+    prefix = find[:FIND_LIMIT]
+    matches, prefix_hits = [], 0
+    while start < end:
+        search = document.Range(start, end)
+        if not _find_in(search, prefix):
+            break
+        prefix_hits += 1
+        hit = int(search.Start)
+        candidate = document.Range(hit, min(hit + len(find), end))
+        if str(candidate.Text) == find:
+            matches.append(candidate)
+        start = hit + 1
+    if not matches:
+        if prefix_hits:
+            raise RefusedUnsafe(LONG_FIND_CROSSES_FIELD.format(length=len(find)))
         raise RefusedUnsafe(
-            f"Word could not find {find!r} in paragraph {paragraph_index}"
+            f"Word could not find the {len(find)}-character text starting {find[:60]!r} in paragraph "
+            f"{paragraph_index}"
         )
-    return search
+    if len(matches) > 1:
+        raise RefusedUnsafe(
+            f"the {len(find)}-character text starting {find[:60]!r} occurs {len(matches)} times in paragraph "
+            f"{paragraph_index}; it must occur exactly once"
+        )
+    return matches[0]
 
 
 def locate_anchor(document, paragraph_index: int, anchor: str):
@@ -200,16 +248,13 @@ def locate_anchor(document, paragraph_index: int, anchor: str):
 
     Public so callers outside this module (citation placement) can reuse the
     same field-coordinate-safe lookup instead of computing a position. Refuses
-    if `anchor` exceeds Word's Find limit, if Word cannot find it, or if the
-    resolved range's text does not match `anchor` exactly. Occurrence-count
+    if Word cannot find it or if the resolved range's text does not match
+    `anchor` exactly; an anchor longer than Word's Find limit is found by its
+    first FIND_LIMIT characters and checked in full (see `_locate`). Occurrence-count
     uniqueness within the paragraph is the caller's job, checked against the
     paragraph's own text before a Word session exists -- that check needs no
     Word session and should fail before one is spun up.
     """
-    if len(anchor) > FIND_LIMIT:
-        raise RefusedUnsafe(
-            f"anchor is {len(anchor)} characters; Word's search cannot exceed {FIND_LIMIT}"
-        )
     candidate = _locate(document, paragraph_index, anchor)
     if str(candidate.Text) != anchor:
         raise RefusedUnsafe(
@@ -324,10 +369,14 @@ def insert_text_to_version(
         raise RefusedUnsafe("text must not be empty")
     if position not in ("before", "after"):
         raise RefusedUnsafe("position must be 'before' or 'after'")
-    if len(anchor) > FIND_LIMIT:
-        raise RefusedUnsafe(
-            f"anchor is {len(anchor)} characters; Word's search cannot exceed {FIND_LIMIT}"
-        )
+    inserted = text + anchor if position == "before" else anchor + text
+    if revision_total(source):
+        # Plan 864: on a document with tracked revisions (and tracking off for this edit) the insertion is
+        # made as untracked direct XML, never through Word, and refused where it touches a revised run.
+        from .revisions import plain_replace
+
+        return plain_replace(source, output, op="insert_text", paragraph_index=paragraph_index, find=anchor,
+                             replace=inserted)
 
     before_paragraphs = read_paragraphs(source)
     target = _target(before_paragraphs, paragraph_index)
@@ -343,16 +392,10 @@ def insert_text_to_version(
             f"it occurs {occurrences} times"
         )
 
-    inserted = text + anchor if position == "before" else anchor + text
     expected = [item.text for item in before_paragraphs]
     expected[paragraph_index - 1] = target.text.replace(anchor, inserted, 1)
 
     before = audit_docx(source)
-    if revision_total(source):
-        raise RefusedUnsafe(
-            f"source contains {revision_total(source)} tracked revision elements; "
-            "tracked-revision editing is not supported"
-        )
     _, output_path = create_versioned_copy(source, output)
     with IsolatedWordDocument(output_path, visible=visible) as session:
         document = session.document
@@ -424,6 +467,176 @@ def _refuse_table_damage(saved, new_index: int, before: Audit, after: Audit) -> 
         )
 
 
+class StyleRef:
+    """A paragraph style resolved against ``word/styles.xml`` (plan 864 decision 19).
+
+    ``style_id`` is what ``w:pStyle`` holds; ``name`` is what Word's COM ``Style`` takes. ``defined`` is False for
+    a built-in Word knows (a latent style) that the document has not defined yet: Word can apply it by name and
+    adds the definition, the direct-XML path cannot."""
+
+    def __init__(self, style_id: str | None, name: str, *, defined: bool = True, default: bool = False) -> None:
+        self.style_id, self.name, self.defined, self.default = style_id, name, defined, default
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"StyleRef({self.style_id!r}, {self.name!r}, defined={self.defined})"
+
+
+def _style_key(value: str) -> str:
+    return "".join(value.split()).casefold()
+
+
+def _styles_root(source: str | Path):
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    with zipfile.ZipFile(source) as archive:
+        if "word/styles.xml" not in archive.namelist():
+            return None
+        return ET.fromstring(archive.read("word/styles.xml"))
+
+
+def resolve_paragraph_style(source: str | Path, style: str) -> StyleRef:
+    """Resolve ``style`` (a styleId or a name, case- and space-insensitive: "Heading 3", "Heading3" and
+    "heading 3" are the same) to one paragraph style of the document. Exact matches win over loose ones; two
+    styles that both match loosely, or none, refuse naming the near matches."""
+
+    import difflib
+
+    from .ooxml import W
+
+    wanted = (style or "").strip()
+    if not wanted:
+        raise RefusedUnsafe("style must not be empty; omit it to copy the anchor paragraph's style")
+    root = _styles_root(source)
+    styles: list[StyleRef] = []
+    latent: list[str] = []
+    if root is not None:
+        for element in root.findall(W + "style"):
+            if element.get(W + "type") != "paragraph" or not element.get(W + "styleId"):
+                continue
+            name_el = element.find(W + "name")
+            name = name_el.get(W + "val") if name_el is not None and name_el.get(W + "val") else element.get(W + "styleId")
+            styles.append(StyleRef(element.get(W + "styleId"), name,
+                                   default=element.get(W + "default") in ("1", "true", "on")))
+        latent = [item.get(W + "name") for item in root.iter(W + "lsdException") if item.get(W + "name")]
+    for exact in (lambda ref: ref.style_id == wanted, lambda ref: ref.name == wanted):
+        found = [ref for ref in styles if exact(ref)]
+        if len(found) == 1:
+            return found[0]
+    key = _style_key(wanted)
+    found = [ref for ref in styles if key in (_style_key(ref.style_id), _style_key(ref.name))]
+    if len(found) == 1:
+        return found[0]
+    if found:
+        listing = ", ".join(f"{ref.name!r} (styleId {ref.style_id})" for ref in found)
+        raise RefusedUnsafe(f"style {wanted!r} matches several paragraph styles: {listing}; pass the exact styleId")
+    built_in = [name for name in latent if _style_key(name) == key]
+    if built_in:
+        return StyleRef(None, built_in[0], defined=False)
+    labels = {ref.name: f"{ref.name!r} (styleId {ref.style_id})" for ref in styles}
+    labels.update({ref.style_id: f"{ref.name!r} (styleId {ref.style_id})" for ref in styles})
+    near = difflib.get_close_matches(wanted, list(labels), n=8, cutoff=0.6) or difflib.get_close_matches(
+        key, [_style_key(item) for item in labels], n=8, cutoff=0.6)
+    near_labels = list(dict.fromkeys(labels[item] for item in near if item in labels)) or [
+        labels[item] for item in labels if _style_key(item) in near][:8]
+    hint = f"; near matches: {', '.join(near_labels)}" if near_labels else ""
+    raise RefusedUnsafe(f"style {wanted!r} is not a paragraph style of this document{hint}; "
+                        "inspect_document lists the styles paragraphs use")
+
+
+def _style_or_builtin(source: str | Path, style: str):
+    """Resolve `style` for a direct-XML insert (plan 973 S3). A style the document defines resolves as before.
+    A Word built-in it has not defined yet (Caption, Heading 1-4, Title, List Paragraph, Quote) comes back with
+    the definitions a private Word adds for it on a styles-only scratch copy (`builtin_styles.plan`; its refusal,
+    such as a clash with an existing style, is passed on); any other undefined style refuses as before.
+    Returns (StyleRef, Addition | None)."""
+
+    from . import builtin_styles
+
+    try:
+        ref = resolve_paragraph_style(source, style)
+    except RefusedUnsafe:
+        if builtin_styles.lookup(style) is None:
+            raise
+        addition = builtin_styles.plan(source, style)
+        return StyleRef(addition.style_id, addition.style_name), addition
+    if ref.defined:
+        return ref, None
+    addition = builtin_styles.plan(source, ref.name)
+    if addition is None:
+        return ref, None
+    return StyleRef(addition.style_id, addition.style_name), addition
+
+
+def _paragraph_style_ids(source: str | Path) -> dict[str, str]:
+    """styleId -> w:name of every style in styles.xml (all types)."""
+
+    from .ooxml import W
+
+    root = _styles_root(source)
+    if root is None:
+        return {}
+    found = {}
+    for element in root.findall(W + "style"):
+        name_el = element.find(W + "name")
+        found[element.get(W + "styleId")] = name_el.get(W + "val") if name_el is not None else element.get(
+            W + "styleId")
+    return found
+
+
+def _word_style_candidates(ref: StyleRef | None, requested: str) -> list:
+    """What Word's COM `Style` is tried with: the name, the styleId, then the built-in's WdBuiltinStyle id (a
+    localized Word knows "Caption" only by its id)."""
+
+    from . import builtin_styles
+
+    candidates: list = [ref.name if ref is not None else requested]
+    if ref is not None and ref.style_id and ref.style_id not in candidates:
+        candidates.append(ref.style_id)
+    built_in = builtin_styles.lookup(ref.name if ref is not None else requested)
+    if built_in is not None:
+        candidates.append(builtin_styles.BUILTINS[built_in])
+    return candidates
+
+
+def _word_style_ref(source: str | Path, style: str) -> StyleRef:
+    """Resolve `style` for the Word path: a style the document defines or lists as latent resolves as before;
+    a built-in of `builtin_styles.BUILTINS` the document neither defines nor lists (no latentStyles) is still one
+    Word adds on first use, so it resolves as an undefined built-in instead of refusing."""
+
+    from . import builtin_styles
+
+    try:
+        return resolve_paragraph_style(source, style)
+    except RefusedUnsafe:
+        built_in = builtin_styles.lookup(style)
+        if built_in is None:
+            raise
+        return StyleRef(None, built_in, defined=False)
+
+
+def _styles_added(source: str | Path, output: str | Path) -> list[str]:
+    """Styles Word's save added to styles.xml (by styleId), named as `builtin_styles` names them."""
+
+    from . import builtin_styles
+
+    before = _paragraph_style_ids(source)
+    return [builtin_styles.lookup(name) or name
+            for style_id, name in _paragraph_style_ids(output).items() if style_id not in before]
+
+
+def _is_default_style(source: str | Path, style_id: str | None) -> bool:
+    from .ooxml import W
+
+    root = _styles_root(source)
+    if root is None or style_id is None:
+        return False
+    return any(
+        element.get(W + "styleId") == style_id and element.get(W + "type") == "paragraph"
+        and element.get(W + "default") in ("1", "true", "on")
+        for element in root.findall(W + "style"))
+
+
 def insert_paragraph_to_version(
     source: str | Path,
     output: str | Path,
@@ -431,6 +644,8 @@ def insert_paragraph_to_version(
     after_paragraph_index: int,
     text: str,
     style: str | None = None,
+    tracked: bool | None = None,
+    author: str | None = None,
     visible: bool = False,
 ) -> dict:
     """Insert one new paragraph directly after an existing one.
@@ -438,10 +653,41 @@ def insert_paragraph_to_version(
     Unlike `replace_text` this shifts every later paragraph index by one, so
     indices an agent already holds from `inspect_document` go stale. The
     result says so explicitly.
+
+    Plan 864 S2: `tracked` (the switch, or the op's own override) makes the
+    paragraph(s) a tracked insertion by `author`, written as direct XML; a
+    document that already has tracked revisions also takes the direct-XML
+    path (untracked when `tracked` is false). Both split `text` on "\\n" into
+    several paragraphs. `style` is resolved against styles.xml first
+    (decision 19), so a name or a styleId both work.
     """
 
     if not text:
         raise RefusedUnsafe("text must not be empty")
+
+    if tracked or revision_total(source):
+        from .builtin_styles import run_with_style
+        from .revisions import DEFAULT_AUTHOR, insert_paragraphs
+
+        ref, addition = _style_or_builtin(source, style) if style else (None, None)
+        if ref is not None and not ref.defined:
+            raise RefusedUnsafe(
+                f"style {style!r} is a Word built-in this document has not used yet, so it has no definition in "
+                "styles.xml to point the new paragraph at; apply it once in Word (or use a style the document "
+                "already has), then insert again")
+        # Plan 973 S3: a missing built-in (builtin_styles.BUILTINS) gets the definitions a private Word adds for it
+        # on a styles-only scratch copy, spliced into styles.xml (not tracked).
+        return run_with_style(source, addition, lambda staged: insert_paragraphs(
+            staged, output, after_paragraph_index=after_paragraph_index, text=text,
+            style_id=ref.style_id if ref is not None else None,
+            default_style=bool(ref is not None and ref.default),
+            style_name=ref.name if ref is not None else None,
+            tracked=bool(tracked), author=(author or DEFAULT_AUTHOR)))
+    ref = _word_style_ref(source, style) if style else None
+    if "\n" in text:
+        raise RefusedUnsafe(
+            "text with \"\\n\" makes several paragraphs, which this document's Word path does not do; "
+            "send one insert_paragraph per paragraph (each after the one before), or turn tracking on")
 
     before_paragraphs = read_paragraphs(source)
     anchor = _target(before_paragraphs, after_paragraph_index)
@@ -456,12 +702,11 @@ def insert_paragraph_to_version(
     expected.insert(after_paragraph_index, text)
 
     before = audit_docx(source)
-    if revision_total(source):
-        raise RefusedUnsafe(
-            f"source contains {revision_total(source)} tracked revision elements; "
-            "tracked-revision editing is not supported"
-        )
-    requested_style = style or "Normal"
+    # Decision 19: Word's COM `Style` takes the style's name ("heading 3"),
+    # while `w:pStyle` stores its styleId ("Heading3"). The request was
+    # resolved once against styles.xml; Word gets the name (then the styleId
+    # as a fallback) and the saved paragraph is compared by styleId.
+    requested_style = ref.name if ref is not None else "Normal"
     _, output_path = create_versioned_copy(source, output)
     with IsolatedWordDocument(output_path, visible=visible) as session:
         document = session.document
@@ -472,12 +717,19 @@ def insert_paragraph_to_version(
         # the *following* paragraph. That produced text in the wrong paragraph
         # until the postcondition caught it.
         created.Range.InsertBefore(text)
-        try:
-            created.Style = requested_style
-        except Exception as exc:
+        candidates = _word_style_candidates(ref, requested_style)
+        last_error: Exception | None = None
+        for candidate in candidates:
+            try:
+                created.Style = candidate
+                last_error = None
+                break
+            except Exception as exc:  # noqa: BLE001 - COM raises bare com_error
+                last_error = exc
+        if last_error is not None:
             raise RefusedUnsafe(
                 f"style {requested_style!r} is not defined in this document"
-            ) from exc
+            ) from last_error
         session.save()
 
     after = audit_docx(output_path)
@@ -492,19 +744,27 @@ def insert_paragraph_to_version(
     # not their contents, so nothing else here would notice.
     _refuse_table_damage(saved, new_index, before, after)
     saved_style = saved[new_index - 1].style
-    # Word commonly omits an explicit pStyle for Normal because it is the
-    # document default. Either spelling therefore verifies the same effective
-    # built-in style; named non-default styles must round-trip exactly.
-    if requested_style == "Normal":
-        style_matches = saved_style in (None, "Normal")
+    # Word omits an explicit pStyle for the document's default paragraph
+    # style, so either spelling verifies it; every other style must
+    # round-trip by styleId (Word adds a latent built-in's definition on use,
+    # so the comparison resolves against the saved document's styles).
+    expected_ref = ref if ref is not None and ref.defined else (
+        resolve_paragraph_style(output_path, requested_style) if ref is not None else None)
+    if expected_ref is None:
+        style_matches = saved_style in (None, "Normal") or _is_default_style(output_path, saved_style)
+        expected_id = "Normal"
     else:
-        style_matches = saved_style == requested_style
+        expected_id = expected_ref.style_id
+        style_matches = saved_style == expected_id or (
+            expected_ref.default and saved_style is None)
     if not style_matches:
         raise VerificationFailed(
             "inserted paragraph style did not round-trip",
-            expected=requested_style,
+            expected=expected_id,
             actual=saved_style,
         )
+    if expected_ref is not None:
+        requested_style = expected_ref.name
 
     return {
         "source": str(Path(source).resolve()),
@@ -512,6 +772,8 @@ def insert_paragraph_to_version(
         "operation": "insert_paragraph",
         "new_paragraph_index": new_index,
         "style": requested_style,
+        "style_id": expected_id,
+        "styles_added": _styles_added(source, output_path),
         "source_sha256": before.sha256,
         "output_sha256": after.sha256,
         "paragraph_count": after.paragraph_count,
@@ -535,9 +797,18 @@ def insert_table_to_version(
     merges: Sequence[MergeGroup] = (),
     caption: str | None = None,
     caption_style: str | None = None,
+    tracked: bool | None = None,
+    author: str | None = None,
     visible: bool = False,
 ) -> dict:
-    """Insert one verified journal-neutral table after a prose paragraph."""
+    """Insert one verified journal-neutral table after a prose paragraph.
+
+    Plan 916 S5: `tracked` (the switch, or the op's own override) makes the table
+    (and caption) a tracked insertion by `author`, written as direct XML the way
+    Word records one (`tracked_table`); a document that already has tracked
+    revisions also takes the direct-XML path (untracked when `tracked` is false).
+    A revision-free document with tracking off keeps the Word path.
+    """
 
     if not headers or not rows:
         raise RefusedUnsafe("a table requires at least one header and one body row")
@@ -549,20 +820,42 @@ def insert_table_to_version(
     ):
         raise RefusedUnsafe("descriptive columns must be inside the table width")
 
+    if tracked or revision_total(source):
+        from . import tracked_table
+        from .revisions import DEFAULT_AUTHOR
+
+        from .builtin_styles import run_with_style
+
+        ref = addition = None
+        if caption is not None:
+            ref, addition = _style_or_builtin(source, caption_style or "Caption")
+            if not ref.defined:
+                raise RefusedUnsafe(
+                    f"caption style {ref.name!r} is a Word built-in this document has not used yet, so it has no "
+                    "definition in styles.xml to point the caption at; apply it once in Word (or pass a "
+                    "caption_style the document already has), then insert again")
+        # Plan 973 S3: a missing Caption (or other built-in of builtin_styles.BUILTINS) gets the definitions a
+        # private Word adds for it on a styles-only scratch copy; they are not tracked, so Reject of a tracked
+        # insertion leaves an unused style behind, as in Word.
+        return run_with_style(source, addition, lambda staged: tracked_table.insert_table(
+            staged, output, after_paragraph_index=after_paragraph_index, headers=headers, rows=rows,
+            descriptive_columns=descriptive_columns, merges=merges, caption=caption,
+            caption_style_id=ref.style_id if ref is not None else None,
+            caption_style_name=(caption_style or "Caption") if ref is not None else None,
+            tracked=bool(tracked), author=(author or DEFAULT_AUTHOR)))
+
     before_paragraphs = read_paragraphs(source)
     anchor = _target(before_paragraphs, after_paragraph_index)
     if anchor.in_table:
         raise RefusedUnsafe("a new table cannot be anchored inside an existing table")
     before = audit_docx(source)
-    if revision_total(source):
-        raise RefusedUnsafe(
-            f"source contains {revision_total(source)} tracked revision elements; "
-            "tracked-revision editing is not supported"
-        )
 
+    # Plan 973 S3: resolve the caption style against styles.xml first (a name or a styleId, as for
+    # insert_paragraph); Word gets its name, then its styleId, then the built-in's WdBuiltinStyle id.
+    requested_caption_style = caption_style or "Caption"
+    caption_ref = _word_style_ref(source, requested_caption_style) if caption is not None else None
     _, output_path = create_versioned_copy(source, output)
     new_table_index = 0
-    requested_caption_style = caption_style or "Caption"
     with IsolatedWordDocument(output_path, visible=visible) as session:
         document = session.document
         old_live = snapshot_live(document)
@@ -571,12 +864,18 @@ def insert_table_to_version(
         if caption is not None:
             caption_paragraph = document.Paragraphs(insertion_index)
             caption_paragraph.Range.InsertBefore(caption)
-            try:
-                caption_paragraph.Style = requested_caption_style
-            except Exception as exc:
+            last_error: Exception | None = None
+            for candidate in _word_style_candidates(caption_ref, requested_caption_style):
+                try:
+                    caption_paragraph.Style = candidate
+                    last_error = None
+                    break
+                except Exception as exc:  # noqa: BLE001 - COM raises bare com_error
+                    last_error = exc
+            if last_error is not None:
                 raise RefusedUnsafe(
                     f"caption style {requested_caption_style!r} is not defined"
-                ) from exc
+                ) from last_error
             caption_paragraph.Range.InsertParagraphAfter()
             insertion_index += 1
 
@@ -687,11 +986,17 @@ def insert_table_to_version(
                 expected=caption,
                 actual=[item.text for item in matches],
             )
-        if matches[0].style != requested_caption_style:
+        # w:pStyle holds the styleId, and Word omits it for the default paragraph style (Normal), so the saved
+        # caption is compared by the styleId the request resolves to in the saved document; the default style
+        # also matches an absent pStyle. Comparing the requested name itself refused caption_style="Normal".
+        expected_ref = caption_ref if caption_ref.defined else resolve_paragraph_style(
+            output_path, caption_ref.name)
+        saved_style = matches[0].style
+        if not (saved_style == expected_ref.style_id or (expected_ref.default and saved_style is None)):
             raise VerificationFailed(
                 "table caption style did not round-trip",
-                expected=requested_caption_style,
-                actual=matches[0].style,
+                expected=expected_ref.style_id,
+                actual=saved_style,
             )
 
     return {
@@ -702,6 +1007,8 @@ def insert_table_to_version(
         "rows": inserted.rows,
         "columns": inserted.columns,
         "caption": caption,
+        "caption_style": expected_ref.name if caption is not None else None,
+        "styles_added": _styles_added(source, output_path),
         "source_sha256": before.sha256,
         "output_sha256": after.sha256,
         "paragraph_count": after.paragraph_count,
@@ -1111,8 +1418,8 @@ def _run_plan(source, output, op: str, make_plan, *, visible: bool = False, time
         raise RefusedUnsafe(
             f"{op}: source contains {revision_total(source)} tracked revision elements; {op} runs through Word, "
             "and any Word save rewrites other authors' revision records, so it is refused here. On a document "
-            "with revisions use replace_text/replace_paragraph (direct XML, untracked), "
-            "tracked_replace_text/tracked_replace_paragraph, or accept_revisions/reject_revisions"
+            "with revisions use replace_text/replace_paragraph/insert_text (direct XML; tracked when "
+            "set_track_changes is on), or accept_revisions/reject_revisions"
         )
     layout = read_layout(source)
     plan = make_plan(layout)
@@ -1189,8 +1496,7 @@ def replace_text_to_version(
 
     if not find:
         raise RefusedUnsafe("find must not be empty")
-    if len(find) > FIND_LIMIT:
-        raise RefusedUnsafe(f"find is {len(find)} characters; Word's search cannot exceed {FIND_LIMIT}")
+    # No FIND_LIMIT here: the plan matches `find` in the layout's text, not with Word's Find (plan 864).
     if revision_total(source):
         from .revisions import plain_replace
 
@@ -1227,45 +1533,67 @@ def replace_paragraph_to_version(
 
 def replace_table_row_to_version(
     source: str | Path, output: str | Path, *, match: str, cells: Sequence[str],
-    table_index: int | None = None, visible: bool = False,
+    table_index: int | None = None, tracked: bool | None = None, author: str | None = None,
+    visible: bool = False,
 ) -> dict:
     """Rewrite one table row, found by one cell's (or one cell line's) text (D9).
 
     `cells` gives every cell's new text; "\\n" separates paragraphs in a
     cell. The cell count must stay the same; paragraphs inside a cell may be
     added or removed.
+
+    Plan 864 S3a: `tracked` (the switch, or the op's own override) records the
+    row's changed lines, added lines and removed lines as tracked changes by
+    `author`, as direct XML (`tracked_sections`); a document that already has
+    tracked revisions takes the same path untracked when `tracked` is false.
     """
 
     from .sections import plan_table_row
 
-    return _run_plan(
-        source, output, "replace_table_row",
-        lambda layout: plan_table_row(layout, "replace_table_row", match, list(cells), table_index=table_index),
-        visible=visible,
-    )
+    make_plan = lambda layout: plan_table_row(  # noqa: E731
+        layout, "replace_table_row", match, list(cells), table_index=table_index)
+    if tracked or revision_total(source):
+        from .revisions import DEFAULT_AUTHOR
+        from .sections import read_layout
+        from .tracked_sections import run_plan_direct
+
+        return run_plan_direct(source, output, make_plan(read_layout(source)), tracked=bool(tracked),
+                               author=author or DEFAULT_AUTHOR)
+    return _run_plan(source, output, "replace_table_row", make_plan, visible=visible)
 
 
 def replace_section_to_version(
     source: str | Path, output: str | Path, *, heading: str,
     paragraphs: Sequence[str] | None = None, rows: Sequence[Sequence[str]] | None = None,
-    until_heading: str | None = None, visible: bool = False,
+    until_heading: str | None = None, tracked: bool | None = None, author: str | None = None,
+    visible: bool = False,
 ) -> dict:
     """Rewrite everything between `heading` and the next heading of its kind (D9).
 
     A section laid out as table rows takes `rows` (cell texts per row); one
     of body paragraphs takes `paragraphs`. Rows/paragraphs may be added or
     removed only inside the section; everything outside is verified unchanged.
+
+    Plan 864 S3a: as `replace_table_row`, `tracked` records the changed,
+    added and removed paragraphs (or row lines) as tracked changes by
+    `author`, as direct XML; a revised document takes the same path untracked
+    when `tracked` is false. Plan 864 S3b: a table row added or removed runs
+    there too, tracked as Word records a row insertion or deletion.
     """
 
     from .sections import plan_section
 
-    return _run_plan(
-        source, output, "replace_section",
-        lambda layout: plan_section(
-            layout, "replace_section", heading,
-            paragraphs=list(paragraphs) if paragraphs is not None else None,
-            rows=[list(row) for row in rows] if rows is not None else None,
-            until_heading=until_heading,
-        ),
-        visible=visible,
+    make_plan = lambda layout: plan_section(  # noqa: E731
+        layout, "replace_section", heading,
+        paragraphs=list(paragraphs) if paragraphs is not None else None,
+        rows=[list(row) for row in rows] if rows is not None else None,
+        until_heading=until_heading,
     )
+    if tracked or revision_total(source):
+        from .revisions import DEFAULT_AUTHOR
+        from .sections import read_layout
+        from .tracked_sections import run_plan_direct
+
+        return run_plan_direct(source, output, make_plan(read_layout(source)), tracked=bool(tracked),
+                               author=author or DEFAULT_AUTHOR)
+    return _run_plan(source, output, "replace_section", make_plan, visible=visible)

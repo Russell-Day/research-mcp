@@ -18,7 +18,7 @@ def request(operations):
     )
 
 
-def test_edit_operation_schema_is_an_eighteen_way_discriminated_union():
+def test_edit_operation_schema_is_a_twenty_three_way_discriminated_union():
     schema = EditDocumentRequest.model_json_schema()
     item = schema["properties"]["operations"]["items"]
     assert item["discriminator"]["propertyName"] == "type"
@@ -41,10 +41,16 @@ def test_edit_operation_schema_is_an_eighteen_way_discriminated_union():
         "resolve_comment",
         "reopen_comment",
         "delete_comment",
+        "delete_citation",
+        "delete_paragraph",
+        "set_track_changes",
+        "style_text",
+        "format_paragraph",
     }
-    assert len(item["oneOf"]) == 18
+    assert len(item["oneOf"]) == 23
     assert schema["properties"]["operations"]["minItems"] == 1
-    assert schema["properties"]["operations"]["maxItems"] == 20
+    # 20 edits, plus room for a leading set_track_changes (plan 864); the 20 is enforced by validate_batch.
+    assert schema["properties"]["operations"]["maxItems"] == 21
 
 
 def test_request_rejects_bad_sha_unknown_fields_and_duplicate_ids():

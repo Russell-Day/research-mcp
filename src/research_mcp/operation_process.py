@@ -26,7 +26,7 @@ def _cleanup_owned_word(registry: Path) -> None:
 
 
 def run_operation(kind: str, payload: dict[str, Any], *, timeout_seconds: float = 120) -> dict:
-    if kind not in {"edit", "style", "render", "tables", "bookmarks", "inline_style"}:
+    if kind not in {"edit", "style", "render", "export_pdf", "tables", "bookmarks", "inline_style", "convert_doc", "tracked_check"}:
         raise ValueError(f"Unknown isolated operation: {kind}")
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
@@ -80,17 +80,26 @@ def _dispatch(kind: str, payload: dict) -> dict:
         return style_exact_text(**payload)
     if kind == "style":
         from .styling import _style_document_local
-        return _style_document_local(payload["source"], payload["profile_name"], payload.get("visible", False), payload.get("emphasis_policy", "preserve"))
+        return _style_document_local(payload["source"], payload["profile_name"], payload.get("visible", False), payload.get("emphasis_policy", "preserve"), payload.get("tracked", False))
     if kind == "tables":
         from .tables import TableFormatSpec, MergeGroup, format_to_version
         specs = tuple(TableFormatSpec(index=raw["index"], descriptive_columns=tuple(raw["descriptive_columns"]), merges=tuple(MergeGroup(**merge) for merge in raw.get("merges", []))) for raw in payload["specs"])
-        return format_to_version(payload["source"], payload["source"], specs).to_dict()
+        return format_to_version(payload["source"], payload["source"], specs, tracked=payload.get("tracked", False)).to_dict()
     if kind == "bookmarks":
         from .bookmarks import release_to_version
         return release_to_version(payload["source"], payload["source"], names=tuple(payload["names"])).to_dict()
     if kind == "render":
         from .rendering import render_docx_pages
         return render_docx_pages(**payload)
+    if kind == "export_pdf":
+        from .rendering import export_docx_pdf
+        return export_docx_pdf(**payload)
+    if kind == "tracked_check":
+        from .word_tracked import word_check_local
+        return word_check_local(payload["jobs"])
+    if kind == "convert_doc":
+        from .legacy_doc import convert_to_docx
+        return convert_to_docx(**payload)
     raise RefusedUnsafe("Unknown worker operation")
 
 

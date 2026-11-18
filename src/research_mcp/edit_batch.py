@@ -75,13 +75,15 @@ def _exclusive_output(output: Path, *, is_inplace: bool = False):
 
 
 def _publish(source: Path, output: Path, *, is_inplace: bool = False, expected_sha256: str | None = None,
-             op: str | None = None) -> dict:
-    """Publish with create-new semantics or atomic in-place replacement (pre-edit state checkpointed)."""
+             op: str | None = None, original: Path | None = None, op_types: str | None = None) -> dict:
+    """Publish with create-new semantics or atomic in-place replacement (pre-edit state checkpointed).
+    ``op_types`` names the applied op types only (no op ids), for edit feedback to classify the write."""
 
     if is_inplace:
         if expected_sha256 is None:
             raise RefusedUnsafe("In-place publication requires the inspected source hash.")
-        return publish_inplace(source, output, expected_sha256=expected_sha256, tool="edit_document", op=op)
+        return publish_inplace(source, output, expected_sha256=expected_sha256, tool="edit_document", op=op,
+                               op_types=op_types)
     created = False
     try:
         with source.open("rb") as reader, output.open("xb") as writer:
@@ -93,7 +95,7 @@ def _publish(source: Path, output: Path, *, is_inplace: bool = False, expected_s
         raise
     if expected_sha256 is None:
         expected_sha256 = file_sha256(source)
-    return note_versioned(expected_sha256, output)
+    return note_versioned(expected_sha256, output, original, op_types=op_types)
 
 
 def _error(exc: Exception) -> OperationError:
@@ -124,7 +126,7 @@ def _mapped_operation(
         return operation
 
     data = operation.model_dump()
-    for field in ("paragraph_index", "after_paragraph_index", "through_paragraph_index"):
+    for field in ("paragraph_index", "after_paragraph_index", "through_paragraph_index", "like_paragraph"):
         if data.get(field) is not None:
             data[field] = _mapped_index(int(data[field]), shifts)
     return operation.__class__.model_validate(data)
@@ -133,7 +135,7 @@ def _mapped_operation(
 def _clean_operation(operation: EditOperation, layout, current: Path) -> tuple[EditOperation, list[dict]]:
     """Plan 551: clean every string the operation writes into the document (textclean, honouring `keep`).
 
-    Cleaned: inserted/replacement text, paragraph text, table cells and headers (and merge labels, alike),
+    Cleaned: inserted/replacement text, paragraph text, table cells, headers and caption (and merge labels),
     comment and reply text. Not cleaned: find/match/anchor/heading strings (they must match the document),
     authors and initials, style names. Replacing a known text (replace_text's `find`, a paragraph's current
     text) cleans only what differs from it, so characters echoed from the document stay as they are."""
@@ -171,6 +173,7 @@ def _clean_operation(operation: EditOperation, layout, current: Path) -> tuple[E
     elif kind == "insert_table":
         data["headers"] = [one(item, single=False) for item in data["headers"]]
         data["rows"] = cells(data["rows"])
+        data["caption"] = one(data["caption"])
         for merge in data["merges"]:
             if isinstance(merge, dict) and "label" in merge:
                 merge["label"] = one(merge["label"], single=False)
@@ -233,11 +236,13 @@ def _apply_operation_local(
     if isinstance(operation, ReplaceTableRowOperation):
         return replace_table_row_to_version(
             source, output, match=operation.match, cells=operation.cells, table_index=operation.table_index,
+            tracked=operation.tracked, author=operation.author,
         )
     if isinstance(operation, ReplaceSectionOperation):
         return replace_section_to_version(
             source, output, heading=operation.heading, paragraphs=operation.paragraphs,
             rows=operation.rows, until_heading=operation.until_heading,
+            tracked=operation.tracked, author=operation.author,
         )
     if isinstance(operation, InsertTextOperation):
         return insert_text_to_version(
@@ -255,6 +260,8 @@ def _apply_operation_local(
             after_paragraph_index=operation.after_paragraph_index,
             text=operation.text,
             style=operation.style,
+            tracked=operation.tracked,
+            author=operation.author,
         )
     if isinstance(operation, InsertTableOperation):
         return insert_table_to_version(
@@ -273,7 +280,38 @@ def _apply_operation_local(
                 )
                 for merge in operation.merges
             ),
+            caption=operation.caption,
+            caption_style=operation.caption_style,
+            tracked=operation.tracked,
+            author=operation.author,
         )
+    if operation.type == "set_track_changes":
+        # Plan 864: research-mcp's tracking switch, a custom document property written as a direct zip edit.
+        from .track_setting import apply_operation as apply_track_setting
+
+        return apply_track_setting(source, output, operation)
+    if operation.type == "delete_citation":
+        # Plan 831 S4: direct XML, one tracked w:del around the whole field; never through Word.
+        from .citation_delete import apply_operation as apply_citation_delete
+
+        return apply_citation_delete(source, output, operation)
+    if operation.type == "style_text":
+        # Plan 864 S6: bold/italic on one phrase; direct XML (tracked as w:rPrChange, or on a revised
+        # document), else Word's own formatting.
+        from .tracked_format import apply_operation as apply_style_text
+
+        return apply_style_text(source, output, operation)
+    if operation.type == "format_paragraph":
+        # Plan 916 S3: font, size, indents, spacing, numbering of whole paragraphs; direct XML, tracked
+        # (w:pPrChange + w:rPrChange) or plain; never through Word.
+        from .paragraph_format import apply_operation as apply_paragraph_format
+
+        return apply_paragraph_format(source, output, operation)
+    if operation.type == "delete_paragraph":
+        # Plan 864 S3c: direct XML, tracked or plain, body or one table cell; never through Word.
+        from .paragraph_delete import apply_operation as apply_paragraph_delete
+
+        return apply_paragraph_delete(source, output, operation)
     if operation.type in COMMENT_OPERATION_TYPES:
         # Plan 562 S1: comments are written as direct XML (comment_ops), never through Word, so they work on
         # documents with tracked changes and leave every other thread byte-identical.
@@ -310,6 +348,9 @@ def _format_diff(operation: EditOperation) -> str:
         change = (f"- '{operation.find}' -> + '{operation.replace}'" if op_type == "tracked_replace_text"
                   else f"= '{operation.text[:60]}'")
         return f"P{operation.paragraph_index}: tracked ({operation.author}) {change}"
+    elif op_type == "set_track_changes":
+        who = f" (author {operation.author})" if operation.on and operation.author else ""
+        return f"Tracking switched {'on' if operation.on else 'off'}{who}"
     elif op_type == "sweep_characters":
         span = (f"P{operation.paragraph_index or 1}-P{operation.through_paragraph_index or operation.paragraph_index}"
                 if operation.paragraph_index or operation.through_paragraph_index else "whole document")
@@ -330,6 +371,27 @@ def _format_diff(operation: EditOperation) -> str:
                 f"'{getattr(operation, 'reply_text', '')[:40]}...'")
     elif op_type in ("resolve_comment", "reopen_comment"):
         return f"Comment #{operation.comment_id}: {'resolved' if op_type == 'resolve_comment' else 'reopened'}"
+    elif op_type == "delete_paragraph":
+        last = operation.through_paragraph_index
+        span = f"P{operation.paragraph_index}" + (f"-P{last}" if last and last != operation.paragraph_index else "")
+        return f"{span}: paragraph(s) deleted"
+    elif op_type == "style_text":
+        what = ", ".join(f"{name} {'on' if value else 'off'}" for name, value in
+                         (("bold", operation.bold), ("italic", operation.italic)) if value is not None)
+        return f"P{operation.paragraph_index}: '{operation.text[:40]}' styled ({what})"
+    elif op_type == "format_paragraph":
+        last = operation.through_paragraph_index
+        span = f"P{operation.paragraph_index}" + (f"-P{last}" if last and last != operation.paragraph_index else "")
+        what = [f"{name} {getattr(operation, name):g}" for name in (
+            "size", "left_indent", "right_indent", "first_line_indent", "space_before", "space_after")
+            if getattr(operation, name) is not None]
+        if operation.font:
+            what.insert(0, f"font {operation.font}")
+        if operation.remove_numbering:
+            what.append("numbering removed")
+        if operation.like_paragraph is not None:
+            what.append(f"like P{operation.like_paragraph}")
+        return f"{span}: paragraph(s) formatted ({', '.join(what)})"
     elif op_type == "delete_comment":
         what = "thread deleted with its replies" if operation.include_replies else "reply deleted"
         return f"Comment #{operation.comment_id}: {what}"
@@ -678,6 +740,7 @@ def edit_document(request: EditDocumentRequest) -> EditBatchResult:
         )
 
     results: list[OperationResult] = []
+    tracking_state: dict = {}
     read_only = False
     groups: _Groups | None = None
     consistency = None
@@ -747,6 +810,7 @@ def edit_document(request: EditDocumentRequest) -> EditBatchResult:
             if applied and (failed or skipped) and not request.allow_partial:
                 _mark_unpublished(results, "Atomic batch discarded because at least one operation failed or was skipped")
                 applied = 0
+            tracking_state = _tracking_state(current if applied else source)
             read_only = bool(applied) and all(
                 request.operations[position].type in READ_ONLY_OPERATION_TYPES or item.details.get("read_only")
                 for position, item in enumerate(results) if item.status == "applied")
@@ -761,8 +825,11 @@ def edit_document(request: EditDocumentRequest) -> EditBatchResult:
                         "Batch consistency check failed; nothing was published: " + "; ".join(problems[:5]))
                 consistency = "passed"
                 publication = _publish(
-                    current, output, is_inplace=is_inplace, expected_sha256=actual_source_sha,
-                    op=", ".join(f"{r.type} {r.op_id}" for r in results if r.status == "applied")[:200],
+                    current, output, is_inplace=is_inplace, expected_sha256=actual_source_sha, original=source,
+                    op=", ".join(f"{r.type}{'(tracked)' if r.details.get('routed_as') else ''} {r.op_id}"
+                                 for r in results if r.status == "applied"),
+                    op_types=", ".join(f"{r.type}{'(tracked)' if r.details.get('routed_as') else ''}"
+                                       for r in results if r.status == "applied"),
                 )
                 published_sha = file_sha256(output)
                 if published_sha != current_sha:
@@ -786,6 +853,7 @@ def edit_document(request: EditDocumentRequest) -> EditBatchResult:
             ),
             message=str(exc),
             sha256_before=actual_source_sha,
+            **_tracking_state(source),
         )
 
     if failed or skipped:
@@ -802,6 +870,7 @@ def edit_document(request: EditDocumentRequest) -> EditBatchResult:
 
     summary_diffs = [
         _format_diff(request.operations[i])
+        + (f" [tracked by {r.details.get('tracking_author')}]" if r.details.get("routed_as") else "")
         for i, r in enumerate(results)
         if r.status == "applied"
     ]
@@ -834,8 +903,31 @@ def edit_document(request: EditDocumentRequest) -> EditBatchResult:
         sha256_before=publication["sha256_before"] if publication else actual_source_sha,
         sha256_after=publication["sha256_after"] if publication else actual_source_sha,
         publish_warning=publication.get("publish_warning") if publication else None,
+        size_growth=publication.get("size_growth") if publication else None,
         cleaned=_merged_cleaned(results),
+        **tracking_state,
     )
+
+
+def _tracking_state(path: Path) -> dict:
+    """Plan 864: the batch result's tracking fields for the document as it stands after the batch."""
+
+    from .revisions import revision_count
+    from .track_setting import OFF_WITH_REVISIONS_NOTE, read_setting
+
+    try:
+        setting = read_setting(path)
+    except RefusedUnsafe:
+        return {}
+    if setting.on:
+        return {"tracking": "on", "tracking_author": setting.author}
+    state: dict = {"tracking": "off"}
+    try:
+        if revision_count(path):
+            state["tracking_note"] = OFF_WITH_REVISIONS_NOTE
+    except RefusedUnsafe:
+        pass
+    return state
 
 
 def _merged_cleaned(results: list[OperationResult]) -> list[dict]:
@@ -855,11 +947,13 @@ def _message(results: list[OperationResult], publication: dict | None, is_inplac
         return ""
     group_note = (f" Not published (rolled back with their group): {', '.join(rolled_back)}."
                   if rolled_back else "")
+    size_note = f" Size: {publication['size_growth']['note']}" if publication.get("size_growth") else ""
     if is_inplace and publication.get("undo_token"):
         return (f"Published in place. undo_document(path) restores the state before this batch "
                 f"(undo_token {publication['undo_token']})." + group_note
-                + (f" WARNING: {publication['publish_warning']}" if publication.get("publish_warning") else ""))
-    return ("Published as a new file." + group_note) if group_note else ""
+                + (f" WARNING: {publication['publish_warning']}" if publication.get("publish_warning") else "")
+                + size_note)
+    return ("Published as a new file." + group_note + size_note) if group_note or size_note else ""
 
 
 def _group_results(groups: _Groups | None, results: list[OperationResult], *, published: bool) -> list[GroupResult]:
@@ -886,7 +980,8 @@ def _group_results(groups: _Groups | None, results: list[OperationResult], *, pu
     return found
 
 
-_REVISION_OPS = ("accept_revisions", "reject_revisions")
+# Ops that may drop a citation (accepting a deletion, deleting one) or restore one; checked by containment.
+_REVISION_OPS = ("accept_revisions", "reject_revisions", "delete_citation")
 
 
 def _zotero_views(path: Path, workdir: Path, tag: str) -> list:
@@ -937,6 +1032,38 @@ def _zotero_contained(candidate, views) -> bool:
         if Counter(getattr(candidate, attribute)) - allowed:
             return False
     return True
+
+
+def _route_format_paragraph(operation, setting):
+    """Plan 916 S3: format_paragraph follows the tracking switch as style_text does (never set: plain); the
+    author is the op's, else the switch's, else "Claude"."""
+
+    from .revisions import DEFAULT_AUTHOR
+    from .track_setting import _info
+
+    tracked = operation.tracked if operation.tracked is not None else setting.on
+    author = operation.author or setting.author or DEFAULT_AUTHOR
+    return operation.model_copy(update={"tracked": tracked, "author": author}), _info(tracked, author)
+
+
+_BLANK_FILL_OPS = ("replace_paragraph", "replace_text", "tracked_replace_paragraph", "tracked_replace_text")
+
+
+def _blank_fill_note(operation, current: Path, layout=None) -> str | None:
+    """Plan 916 S3 (decision 6): filling an EMPTY paragraph that is numbered or whose mark is >= 2 pt off the
+    nearest body paragraph gets a hint naming format_paragraph(like_paragraph=M). Read only; a failure to
+    work it out never fails the edit."""
+
+    if operation.type not in _BLANK_FILL_OPS:
+        return None
+    try:
+        if layout is not None and layout.para(operation.paragraph_index).text.strip():
+            return None  # not a blank paragraph: skip reading the package again
+        from .paragraph_format import blank_fill_note
+
+        return blank_fill_note(current, operation.paragraph_index)
+    except Exception:
+        return None
 
 
 def _stage(
@@ -1012,14 +1139,33 @@ def _stage(
         candidate = workdir / f"{sequence:02d}-{operation.op_id}.docx"
         before_count = audit_docx(current).paragraph_count
         try:
-            requested = getattr(operation, "paragraph_index", None)
-            for first, last, owner in stale:
-                if requested is not None and first <= requested <= last:
-                    raise RefusedUnsafe(
-                        f"paragraph_index {requested} lies inside the rows/paragraphs that {owner} rewrote with a "
-                        f"different paragraph count, so it no longer names a known paragraph; fold this edit "
-                        f"into {owner} or address the text by section/row")
+            # Every source selector (a range's start and end, an insertion's anchor) must name a paragraph that
+            # still exists as itself; a range that merely spans a rewritten block maps fine.
+            for field in ("paragraph_index", "through_paragraph_index", "after_paragraph_index", "like_paragraph"):
+                requested = getattr(operation, field, None)
+                for first, last, owner in stale:
+                    if requested is not None and first <= requested <= last:
+                        raise RefusedUnsafe(
+                            f"{field} {requested} lies inside the rows/paragraphs that {owner} rewrote with a "
+                            f"different paragraph count or removed, so it no longer names a known paragraph; "
+                            f"fold this edit into {owner} or address the text by section/row")
             mapped, cleaned = _clean_operation(mapped, staged_layout, current)
+            # Plan 864: the document's tracking switch (as staged so far, so a set_track_changes earlier in
+            # the batch counts) turns text ops into tracked edits and refuses ops it cannot track.
+            from .track_setting import SET_OP, read_setting, route_operation
+
+            tracking = None
+            if mapped.type != SET_OP:  # set_track_changes may be what repairs an unreadable switch
+                mapped, tracking = route_operation(operation, mapped, read_setting(current))
+            if mapped.type == "format_paragraph":
+                mapped, tracking = _route_format_paragraph(mapped, read_setting(current))
+            format_note = _blank_fill_note(mapped, current, staged_layout)
+            evidence = None
+            if getattr(mapped, "addressed_by", None):
+                # Plan 831 S3: an earlier edit (revision id, or undo_token of this document) answers the comment.
+                from .comment_ops import addressed_evidence
+
+                evidence = addressed_evidence(source, current, list(mapped.addressed_by))
             details = _apply_operation(current, candidate, mapped)
             candidate_problems = document_structure_errors(candidate)
             if candidate_problems:
@@ -1040,6 +1186,12 @@ def _stage(
                 op_details.update(details)
             if cleaned:
                 op_details["cleaned"] = cleaned
+            if evidence is not None:
+                op_details["addressed_by"] = evidence
+            if tracking:
+                op_details.update(tracking)
+            if format_note:
+                op_details["format_note"] = format_note
             req_idx = getattr(operation, "paragraph_index", getattr(operation, "after_paragraph_index", None))
             res_idx = getattr(mapped, "paragraph_index", getattr(mapped, "after_paragraph_index", None))
             if req_idx is not None and res_idx is not None and (any(shifts) or req_idx != res_idx):
@@ -1076,6 +1228,11 @@ def _stage(
                 shifts.append([(int(first), int(delta)) for first, delta in details["index_shifts"]])
                 if position in groups.ranges:
                     first, last = groups.ranges[position]
+                    stale.append((first, last, f"{operation.type} {operation.op_id!r}"))
+                if details.get("deleted_range"):
+                    # Plan 864 S3c: an untracked delete_paragraph removed these (source) paragraphs.
+                    first = int(operation.paragraph_index)
+                    last = int(operation.through_paragraph_index or first)
                     stale.append((first, last, f"{operation.type} {operation.op_id!r}"))
             elif index_delta:
                 base = getattr(

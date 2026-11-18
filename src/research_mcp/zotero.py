@@ -20,6 +20,8 @@ from . import config
 from .errors import RefusedUnsafe, ZoteroItemNotFound, ZoteroUnavailable
 
 _COLLECTION_KEY_RE = re.compile(r"^[A-Z0-9]{8}$")
+# arXiv DOIs are registered with DataCite, not CrossRef (normalized: lowercase).
+_ARXIV_DOI_RE = re.compile(r"^10\.48550/arxiv\.(.+)$")
 
 CROSSREF_TYPE_MAP = {
     "journal-article": "journalArticle",
@@ -49,6 +51,13 @@ def normalize_doi(doi: str) -> str:
     if not text.startswith("10.") or "/" not in text:
         raise RefusedUnsafe(f"not a well-formed DOI: {doi!r}")
     return text
+
+
+def _doi_match_key(doi: str) -> str:
+    """The DOI as compared for duplicates: normalized, arXiv version suffix dropped."""
+    normalized = normalize_doi(doi)
+    arxiv_id = arxiv_id_from_doi(normalized)
+    return f"10.48550/arxiv.{arxiv_id}" if arxiv_id else normalized
 
 
 @dataclass(frozen=True)
@@ -118,7 +127,7 @@ class ZoteroClient:
         existing item and create duplicates.
         """
 
-        wanted = normalize_doi(doi)
+        wanted = _doi_match_key(doi)
         matches: list[str] = []
         for entry in self.top_level():
             data = entry.get("data", entry) if isinstance(entry, dict) else {}
@@ -128,7 +137,7 @@ class ZoteroClient:
             if not raw:
                 continue
             try:
-                if normalize_doi(str(raw)) == wanted:
+                if _doi_match_key(str(raw)) == wanted:
                     matches.append(str(data.get("key") or entry.get("key") or ""))
             except RefusedUnsafe:
                 continue
@@ -449,6 +458,169 @@ def _fetch_crossref_work(doi: str) -> dict[str, Any]:
     return message
 
 
+def arxiv_id_from_doi(doi: str) -> str | None:
+    """The arXiv identifier in a normalized arXiv DOI (10.48550/arxiv.<id>), else None.
+
+    A version suffix (v2) is dropped: arXiv registers DOIs for the paper, not
+    for each version.
+    """
+    match = _ARXIV_DOI_RE.match(doi)
+    return re.sub(r"v\d+$", "", match.group(1)) if match else None
+
+
+def _fetch_datacite_work(doi: str) -> dict[str, Any]:
+    """DataCite's record for `doi` (the JSON:API `data.attributes`)."""
+    url = f"https://api.datacite.org/dois/{quote(doi)}"
+    request = Request(url, headers={"User-Agent": "research-mcp/0.1", "Accept": "application/json"})
+    try:
+        with urlopen(request, timeout=15.0) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        if exc.code == 404:
+            raise ZoteroItemNotFound(f"DOI not found on DataCite: {doi}") from exc
+        raise ZoteroUnavailable(f"DataCite request failed for {doi}: {exc}") from exc
+    except Exception as exc:
+        raise ZoteroUnavailable(f"DataCite request failed for {doi}: {exc}") from exc
+    data = payload.get("data") if isinstance(payload, dict) else None
+    attributes = data.get("attributes") if isinstance(data, dict) else None
+    if not isinstance(attributes, dict):
+        raise ZoteroUnavailable(f"unexpected DataCite response for {doi}")
+    return attributes
+
+
+def _crossref_item_data(
+    write_client, work: dict[str, Any], doi: str
+) -> tuple[dict[str, Any], list[dict[str, str]], str]:
+    """Zotero item data, creators and plain-text abstract from a CrossRef work."""
+    zot_type = CROSSREF_TYPE_MAP.get(str(work.get("type", "")), "document")
+    item_data = dict(write_client.item_template(zot_type))
+
+    titles = work.get("title") or []
+    if titles and "title" in item_data:
+        item_data["title"] = titles[0]
+
+    creators: list[dict[str, str]] = []
+    for author in work.get("author", []) or []:
+        if "family" in author:
+            creators.append({
+                "creatorType": "author", "firstName": author.get("given", ""), "lastName": author["family"],
+            })
+        elif "name" in author:
+            creators.append({"creatorType": "author", "name": author["name"]})
+    for editor in work.get("editor", []) or []:
+        if "family" in editor:
+            creators.append({
+                "creatorType": "editor", "firstName": editor.get("given", ""), "lastName": editor["family"],
+            })
+        elif "name" in editor:
+            creators.append({"creatorType": "editor", "name": editor["name"]})
+    if creators and "creators" in item_data:
+        item_data["creators"] = creators
+
+    date_parts = ((work.get("published") or work.get("created") or {}).get("date-parts") or [[]])[0]
+    if date_parts and "date" in item_data:
+        item_data["date"] = "-".join(str(part) for part in date_parts)
+
+    abstract = _strip_markup(str(work.get("abstract", "")))
+    field_values = {
+        "DOI": doi,
+        "url": str(work.get("URL", "")),
+        "volume": str(work.get("volume", "")),
+        "issue": str(work.get("issue", "")),
+        "pages": str(work.get("page", "")),
+        "publisher": str(work.get("publisher", "")),
+        "ISSN": (work.get("ISSN") or [""])[0],
+        "publicationTitle": (work.get("container-title") or [""])[0],
+        "abstractNote": abstract,
+    }
+    for field, value in field_values.items():
+        if field in item_data and value:
+            item_data[field] = value
+    return item_data, creators, abstract
+
+
+def _arxiv_item_data(
+    write_client, work: dict[str, Any], arxiv_id: str
+) -> tuple[dict[str, Any], list[dict[str, str]], str]:
+    """A Zotero preprint (repository arXiv) from a DataCite record."""
+    item_data = dict(write_client.item_template("preprint"))
+
+    titles = [t.get("title") for t in work.get("titles") or [] if isinstance(t, dict) and t.get("title")]
+    if titles and "title" in item_data:
+        item_data["title"] = " ".join(str(titles[0]).split())
+
+    creators: list[dict[str, str]] = []
+    for creator in work.get("creators") or []:
+        if not isinstance(creator, dict):
+            continue
+        family = creator.get("familyName")
+        name = str(creator.get("name") or "")
+        if family:
+            creators.append({
+                "creatorType": "author", "firstName": str(creator.get("givenName") or ""),
+                "lastName": str(family),
+            })
+        elif creator.get("nameType") != "Organizational" and "," in name:
+            last, _, first = name.partition(",")
+            creators.append({"creatorType": "author", "firstName": first.strip(), "lastName": last.strip()})
+        elif name:
+            creators.append({"creatorType": "author", "name": name})
+    if creators and "creators" in item_data:
+        item_data["creators"] = creators
+
+    dates = {
+        d.get("dateType"): d.get("date")
+        for d in work.get("dates") or [] if isinstance(d, dict) and d.get("date")
+    }
+    date = dates.get("Submitted") or dates.get("Issued") or work.get("publicationYear") or ""
+    date = str(date)
+    if re.match(r"\d{4}-\d{2}-\d{2}T", date):
+        date = date[:10]  # drop the time from an ISO timestamp
+    if date and "date" in item_data:
+        item_data["date"] = date
+
+    abstract = ""
+    for description in work.get("descriptions") or []:
+        if isinstance(description, dict) and description.get("descriptionType") == "Abstract":
+            # Plain text with LaTeX, not HTML: an HTML parser would cut "$k<n$".
+            abstract = " ".join(str(description.get("description") or "").split())
+            break
+
+    field_values = {
+        # arXiv's own casing, as citations render it; DOI lookup is case-blind.
+        "DOI": f"10.48550/arXiv.{arxiv_id}",
+        "url": f"https://arxiv.org/abs/{arxiv_id}",
+        "repository": "arXiv",
+        "archiveID": f"arXiv:{arxiv_id}",
+        "abstractNote": abstract,
+    }
+    for field, value in field_values.items():
+        if field in item_data and value:
+            item_data[field] = value
+    return item_data, creators, abstract
+
+
+def _attach_pdf(write_client, item_key: str, pdf_url: str) -> tuple[bool, str]:
+    """Download `pdf_url` and attach it to `item_key`; a failure never fails the add."""
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp_path = tmp.name
+            request = Request(pdf_url, headers={"User-Agent": "research-mcp/0.1"})
+            with urlopen(request, timeout=30.0) as response:
+                tmp.write(response.read())
+        write_client.attachment_simple([tmp_path], item_key)
+        return True, "attached"
+    except Exception:
+        return False, "download failed"
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
 def _find_unpaywall_pdf_url(doi: str) -> str | None:
     """Best open-access PDF URL for `doi`, or None if unfound/unconfigured.
 
@@ -497,6 +669,10 @@ def add_item_by_doi(
 ) -> dict[str, Any]:
     """DOI in, full CrossRef metadata + best-effort OA PDF Zotero item out.
 
+    arXiv DOIs (10.48550/arXiv.*) are DataCite DOIs: their metadata comes from
+    DataCite and they become `preprint` items (repository arXiv, archiveID
+    arXiv:<id>) with the arXiv PDF attached.
+
     Returns the existing item (created=False) instead of a duplicate when the
     DOI is already in the library. Files into `collection`, or the collection
     named by a `.zotero-collection` marker found walking up from `path`, if
@@ -505,6 +681,9 @@ def add_item_by_doi(
     trailing punctuation.
     """
     normalized = normalize_doi(doi)
+    arxiv_id = arxiv_id_from_doi(normalized)
+    if arxiv_id:
+        normalized = f"10.48550/arxiv.{arxiv_id}"
     read_client = ZoteroClient()
 
     marker_details = find_project_collection_details(path) if path else None
@@ -572,58 +751,18 @@ def add_item_by_doi(
             result["collection"] = target_name
         return result
 
-    # Fetch CrossRef metadata first before creating collections or write client
-    work = _fetch_crossref_work(normalized)
+    # Fetch metadata first, before creating collections or the write client.
+    work = _fetch_datacite_work(normalized) if arxiv_id else _fetch_crossref_work(normalized)
 
     write_client = _write_client_from_env()
 
     if target_name is not None and target_key is None:
         target_key = _create_collection(write_client, target_name)
 
-    zot_type = CROSSREF_TYPE_MAP.get(str(work.get("type", "")), "document")
-    item_data = dict(write_client.item_template(zot_type))
-
-    titles = work.get("title") or []
-    if titles and "title" in item_data:
-        item_data["title"] = titles[0]
-
-    creators: list[dict[str, str]] = []
-    for author in work.get("author", []) or []:
-        if "family" in author:
-            creators.append({
-                "creatorType": "author", "firstName": author.get("given", ""), "lastName": author["family"],
-            })
-        elif "name" in author:
-            creators.append({"creatorType": "author", "name": author["name"]})
-    for editor in work.get("editor", []) or []:
-        if "family" in editor:
-            creators.append({
-                "creatorType": "editor", "firstName": editor.get("given", ""), "lastName": editor["family"],
-            })
-        elif "name" in editor:
-            creators.append({"creatorType": "editor", "name": editor["name"]})
-    if creators and "creators" in item_data:
-        item_data["creators"] = creators
-
-    date_parts = ((work.get("published") or work.get("created") or {}).get("date-parts") or [[]])[0]
-    if date_parts and "date" in item_data:
-        item_data["date"] = "-".join(str(part) for part in date_parts)
-
-    abstract = _strip_markup(str(work.get("abstract", "")))
-    field_values = {
-        "DOI": normalized,
-        "url": str(work.get("URL", "")),
-        "volume": str(work.get("volume", "")),
-        "issue": str(work.get("issue", "")),
-        "pages": str(work.get("page", "")),
-        "publisher": str(work.get("publisher", "")),
-        "ISSN": (work.get("ISSN") or [""])[0],
-        "publicationTitle": (work.get("container-title") or [""])[0],
-        "abstractNote": abstract,
-    }
-    for field, value in field_values.items():
-        if field in item_data and value:
-            item_data[field] = value
+    if arxiv_id:
+        item_data, creators, abstract = _arxiv_item_data(write_client, work, arxiv_id)
+    else:
+        item_data, creators, abstract = _crossref_item_data(write_client, work, normalized)
 
     if target_key:
         item_data["collections"] = [target_key]
@@ -635,30 +774,18 @@ def add_item_by_doi(
     item_key = next(iter(success.values()))
 
     pdf_attached = False
-    pdf_status = "no contact email configured"
-    if config.get("ZOTERO_MCP_CONTACT_EMAIL", ""):
+    if arxiv_id:
+        pdf_attached, pdf_status = _attach_pdf(
+            write_client, item_key, f"https://arxiv.org/pdf/{arxiv_id}"
+        )
+    elif config.get("ZOTERO_MCP_CONTACT_EMAIL", ""):
         pdf_url = _find_unpaywall_pdf_url(normalized)
         if pdf_url is None:
             pdf_status = "not found"
         else:
-            tmp_path: str | None = None
-            try:
-                with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-                    tmp_path = tmp.name
-                    request = Request(pdf_url, headers={"User-Agent": "research-mcp/0.1"})
-                    with urlopen(request, timeout=30.0) as response:
-                        tmp.write(response.read())
-                write_client.attachment_simple([tmp_path], item_key)
-                pdf_attached = True
-                pdf_status = "attached"
-            except Exception:
-                pdf_status = "download failed"
-            finally:
-                if tmp_path:
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
+            pdf_attached, pdf_status = _attach_pdf(write_client, item_key, pdf_url)
+    else:
+        pdf_status = "no contact email configured"
 
     visible_locally = False
     for _ in range(5):

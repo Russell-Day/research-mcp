@@ -19,10 +19,11 @@ def test_rendering_opens_word_read_only_and_hides_pdftoppm(monkeypatch, tmp_path
     class FakeSession:
         document = FakeDocument()
 
-        def __init__(self, path, *, visible=False, read_only=False):
+        def __init__(self, path, *, visible=False, read_only=False, timeout_seconds=30.0):
             calls["path"] = path
             calls["visible"] = visible
             calls["read_only"] = read_only
+            calls["timeout_seconds"] = timeout_seconds
 
         def __enter__(self):
             return self
@@ -45,6 +46,7 @@ def test_rendering_opens_word_read_only_and_hides_pdftoppm(monkeypatch, tmp_path
     assert calls["path"] == source.resolve()
     assert calls["visible"] is False
     assert calls["read_only"] is True
+    assert calls["timeout_seconds"] == rendering.WORD_EXPORT_TIMEOUT_SECONDS
     assert calls["export"]["Item"] == 0
     assert calls["run_kwargs"]["creationflags"] == getattr(subprocess, "CREATE_NO_WINDOW", 0)
     assert calls["run_kwargs"]["timeout"] == 120

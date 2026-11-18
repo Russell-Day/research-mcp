@@ -618,7 +618,86 @@ def test_addressed_without_dependency_suggests_alternatives(tracked):
             {"op_id": "r1", "type": "reply_comment", "comment_id": "A", "disposition": "addressed",
              "reply_text": "Done"}])
     message = str(caught.value)
-    assert "requires" in message and "no_change" in message and "rejected" in message
+    assert "requires evidence" in message and "no_change" in message and "rejected" in message
+    assert "addressed_by" in message and "'reply'" in message
+
+
+def test_addressed_by_only_with_addressed_or_reply(tracked):
+    from research_mcp.edit_models import EditDocumentRequest
+
+    ok = EditDocumentRequest(source=str(tracked), source_sha256="0" * 64, operations=[
+        {"op_id": "r1", "type": "reply_comment", "comment_id": "A", "disposition": "addressed",
+         "reply_text": "Done", "addressed_by": ["1"]}])
+    assert ok.operations[0].addressed_by == ["1"]
+    with pytest.raises(ValidationError, match="addressed_by is evidence"):
+        EditDocumentRequest(source=str(tracked), source_sha256="0" * 64, operations=[
+            {"op_id": "r1", "type": "reply_comment", "comment_id": "A", "disposition": "rejected",
+             "reply_text": "No", "addressed_by": ["1"]}])
+
+
+# -- plan 831 S3: plain replies and evidence from earlier edits ---------------------------------------------
+
+def test_plain_reply_has_no_prefix(rich, tmp_path):
+    """chk_cf8ba8cf08ba4232: answering a coauthor's question reads "Correct, fixed.", not "No change: ..."."""
+    out = tmp_path / "out.docx"
+    result = apply(rich, out, type="reply_comment", comment_id=DURABLE["0"], disposition="reply",
+                   reply_text="  Correct, fixed.  ", resolve=True)
+    thread = threads(out)["0"]
+    assert thread["replies"][-1]["text"] == "Correct, fixed." == result["reply_text"]
+    assert result["disposition"] == "reply"
+    assert thread["done"] is True and result["resolved"] is True
+    assert threads(out)["42"] == threads(rich)["42"]
+    assert revisions_raw(out) == revisions_raw(rich)
+
+
+def test_plain_reply_to_resolved_thread_keeps_it_resolved(rich, tmp_path):
+    out = tmp_path / "out.docx"
+    with pytest.raises(RefusedUnsafe, match="resolved; reopen_comment"):
+        apply(rich, out, type="reply_comment", comment_id=DURABLE["42"], disposition="reply", reply_text="Yes.")
+    apply(rich, out, type="reply_comment", comment_id=DURABLE["42"], disposition="reply", reply_text="Yes.",
+          resolve=True)
+    thread = threads(out)["42"]
+    assert thread["done"] is True and thread["replies"][-1]["text"] == "Yes."
+    assert threads(out)["0"] == threads(rich)["0"]
+
+
+def test_edits_in_effect_follows_undo_and_redo():
+    from research_mcp.comment_ops import _edits_in_effect
+
+    def edit(i, before, after):
+        return {"id": f"u-{i}", "kind": "edit", "sha_before": before, "sha_after": after}
+
+    def undo(i, before, after, undid):
+        return {"id": f"r-{i}", "kind": "undo", "sha_before": before, "sha_after": after, "undid": undid}
+
+    entries = [edit(1, "a", "b"), edit(2, "b", "c"), {"id": "c-1", "kind": "checkpoint", "sha_before": "c",
+                                                     "sha_after": "c", "label": "x"}, edit(3, "c", "d"),
+               edit(4, "d", "e")]
+    assert _edits_in_effect({"entries": entries}) == {"u-1", "u-2", "u-3", "u-4"}
+    # undoing edit 2 restores its sha_before: edits 2, 3 and 4 are gone
+    entries.append(undo(1, "e", "b", "u-2"))
+    assert _edits_in_effect({"entries": entries}) == {"u-1"}
+    # undoing that undo brings them back; an outside change keeps them
+    entries.append(undo(2, "b", "e", "r-1"))
+    entries.append({"id": "x-1", "kind": "external", "sha_before": "e", "sha_after": "f"})
+    assert _edits_in_effect({"entries": entries}) == {"u-1", "u-2", "u-3", "u-4"}
+    # undo to the checkpoint label: edits after it are gone
+    entries.append(undo(3, "f", "c", "c-1"))
+    assert _edits_in_effect({"entries": entries}) == {"u-1", "u-2"}
+    # a later edit on the restored state builds on what is in effect there
+    entries.append(edit(5, "c", "g"))
+    assert _edits_in_effect({"entries": entries}) == {"u-1", "u-2", "u-5"}
+
+
+def test_edits_in_effect_survives_an_edit_that_recreates_earlier_bytes():
+    """Review F (optional): a->b, b->a (an edit giving back the exact earlier bytes), a->c, undo of the first."""
+    from research_mcp.comment_ops import _edits_in_effect
+
+    entries = [{"id": "u-1", "kind": "edit", "sha_before": "a", "sha_after": "b"},
+               {"id": "u-2", "kind": "edit", "sha_before": "b", "sha_after": "a"},
+               {"id": "u-3", "kind": "edit", "sha_before": "a", "sha_after": "c"},
+               {"id": "r-1", "kind": "undo", "sha_before": "c", "sha_after": "a", "undid": "u-1"}]
+    assert _edits_in_effect({"entries": entries}) == set()
 
 
 # -- B11: author ---------------------------------------------------------------------------------------------
@@ -652,7 +731,11 @@ def test_server_envelope_defaults():
     add = _strict_operation_payload(MCPEditOperation(op_id="a", type="add_comment", paragraph_index=2,
                                                      anchor="x", text="y"))
     assert (add.author, add.initials) == (None, None)  # resolved when the op runs
-    for given, expected in (("accepted", "addressed"), ("no_change", "no_change"),
+    evidence = _strict_operation_payload(MCPEditOperation(op_id="r", type="reply_comment", comment_id="A",
+                                                          disposition="reply", reply_text="t",
+                                                          addressed_by=["12", "u-1"]))
+    assert (evidence.disposition, evidence.addressed_by) == ("reply", ["12", "u-1"])
+    for given, expected in (("accepted", "addressed"), ("no_change", "no_change"), ("reply", "reply"),
                             ("needs_information", "needs_information"), ("rejected", "rejected")):
         reply = _strict_operation_payload(MCPEditOperation(op_id="r", type="reply_comment", comment_id="A",
                                                            disposition=given, reply_text="t", resolve=True))
@@ -694,6 +777,68 @@ def test_edit_document_comment_ops_undo(rich):
     assert len(after) == 3
     undone = undo_document(str(rich))
     assert undone["restored"] is True and file_sha256(rich) == before_sha and threads(rich) == before_threads
+
+
+def _reply_batch(source: Path, **reply):
+    from research_mcp.edit_batch import edit_document
+    from research_mcp.edit_models import EditDocumentRequest
+
+    return edit_document(EditDocumentRequest(source=str(source), source_sha256=file_sha256(source),
+                                             output=str(source), operations=[
+        {"op_id": "r", "type": "reply_comment", "comment_id": DURABLE["0"], "disposition": "addressed",
+         "reply_text": "Reworded.", **reply}]))
+
+
+@windows_only
+def test_addressed_by_revision_id_from_an_earlier_batch(rich):
+    """chk_cf8ba8cf08ba4232 (2): a tracked change made earlier answers the comment; no depends_on needed."""
+    before = threads(rich)
+    result = _reply_batch(rich, addressed_by=["1"])
+    assert result.status == "complete", result
+    [op] = result.operations
+    assert op.details["addressed_by"][0]["evidence"] == "1"
+    assert op.details["addressed_by"][0]["kind"] == "revision"
+    assert threads(rich)["0"]["replies"][-1]["text"] == "Addressed: Reworded."
+    assert len(threads(rich)["0"]["replies"]) == len(before["0"]["replies"]) + 1
+
+
+@windows_only
+@pytest.mark.parametrize(("evidence", "message"), [
+    ("999", "revision '999' is not in the document"),
+    ("u-0000000000", "is not in this document's history"),
+], ids=["revision", "token"])
+def test_addressed_by_unknown_evidence_refuses(rich, evidence, message):
+    before_sha = file_sha256(rich)
+    result = _reply_batch(rich, addressed_by=[evidence])
+    assert result.status != "complete"
+    assert message in result.operations[0].error.message
+    assert file_sha256(rich) == before_sha
+
+
+@windows_only
+def test_addressed_by_undo_token_in_effect_undone_and_redone(rich):
+    from research_mcp.edit_batch import edit_document
+    from research_mcp.edit_models import EditDocumentRequest
+    from research_mcp.publication import checkpoint_document, document_history, undo_document
+
+    edit = edit_document(EditDocumentRequest(source=str(rich), source_sha256=file_sha256(rich), output=str(rich),
+                                             operations=[{"op_id": "a", "type": "add_comment",
+                                                          "paragraph_index": 2, "anchor": "highly accurate",
+                                                          "text": "Earlier edit"}]))
+    token = edit.undo_token
+    assert edit.status == "complete" and token
+    undo_document(str(rich))
+    refused = _reply_batch(rich, addressed_by=[token])
+    assert refused.status != "complete" and "was undone" in refused.operations[0].error.message
+    undo_document(str(rich))  # undo the undo: the edit is back in effect
+    checkpoint_document(str(rich), "before reply")
+    checkpoint_id = next(e["id"] for e in document_history(str(rich))["entries"] if e["kind"] == "checkpoint")
+    not_edit = _reply_batch(rich, addressed_by=[checkpoint_id])
+    assert not_edit.status != "complete" and "not an edit" in not_edit.operations[0].error.message
+    done = _reply_batch(rich, addressed_by=[token], resolve=True)
+    assert done.status == "complete", done
+    assert done.operations[0].details["addressed_by"][0]["kind"] == "edit"
+    assert threads(rich)["0"]["done"] is True
 
 
 def _partial_batch(source: Path, comment_op: dict):

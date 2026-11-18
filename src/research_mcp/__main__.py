@@ -4,7 +4,7 @@
     research-mcp serve [--transport] the same, with the server's own options
     research-mcp setup               check this PC and add the server to your MCP clients
     research-mcp doctor              check an existing install (exit code 1 when a required check fails)
-    research-mcp chatgpt             serve the tools to ChatGPT (HTTP + a public tunnel address)
+    research-mcp chatgpt             serve the tools to ChatGPT on the web (HTTP + a public tunnel address)
     research-mcp <rmcp command>      the diagnostic commands of ``rmcp`` (audit, bookmarks, ...)
 
 A first argument that starts with ``-`` (other than ``-h``/``--version``) goes to the server, so launch lines
@@ -25,8 +25,9 @@ Word and Zotero tools for MCP clients (Windows, Microsoft Word, Zotero desktop).
 commands:
   serve     run the MCP server over stdio (the default; `{PROG} serve --help` for HTTP options)
   setup     check this PC, store an optional Zotero key, add the server to your MCP clients
+            (Claude, the ChatGPT app, Codex, Cursor, VS Code)
   doctor    check an existing install; exit code 1 when a required check fails
-  chatgpt   serve the tools to ChatGPT through a public HTTPS address (keep the window open)
+  chatgpt   serve the tools to ChatGPT on the web through a public HTTPS address (keep the window open)
 
 diagnostics (same as the `rmcp` command): audit, bookmarks, integration-status, word-worker-status, ...
 `{PROG} <command> --help` shows a command's options.

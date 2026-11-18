@@ -127,8 +127,8 @@ def read_field(path: Path, cid: str) -> tuple[dict, str, list[str]]:
                 state = "result"
             elif kind == "end":
                 if state == "result" and depth == mine_depth:
-                    text = "".join(instr)
-                    payload = json.loads(text[text.index("{"):text.rindex("}") + 1])
+                    text = "".join(instr)  # a field whose code is tracked-deleted text reads as ""
+                    payload = json.loads(text[text.index("{"):text.rindex("}") + 1]) if "{" in text else {}
                     if payload.get("citationID") == cid:
                         return payload, "".join(result), instr
                     state = "done"
@@ -461,3 +461,27 @@ def test_trashed_kept_key_refused(doc, tmp_path, fake_refresh):
     with pytest.raises(RefusedUnsafe, match="'K1' is in the trash"):
         edit(doc, tmp_path / "o.docx", ["K1"], citation_id="cA", zotero=FakeZotero(trashed={"K1"}))
     assert not (tmp_path / "o.docx").exists()
+
+
+def test_citation_in_a_tracked_deletion_is_named_not_missed(tmp_path, fake_refresh):
+    """Plan 924 S2: a citation whose field code is tracked-deleted text (w:delInstrText) is found and refused."""
+    cluster = _field("cB", [_entry("K3")], ["(3)"])
+    deleted = (cluster.replace("w:instrText", "w:delInstrText").replace("<w:t>", "<w:delText>")
+               .replace("</w:t>", "</w:delText>"))
+    xml = _body().replace(cluster, f'<w:del w:id="106" w:author="Reviewer B" w:date="2026-11-04T09:00:00Z">'
+                                   f'{deleted}</w:del>')
+    assert "w:delInstrText" in xml
+    doc = make_docx(tmp_path / "deleted.docx", xml)
+    para = next(i for i, p in enumerate(doc_xml(doc).split("<w:p>")[1:], 1) if "w:delInstrText" in p)
+    with pytest.raises(RefusedUnsafe, match=r"citation cB has its field code deleted in tracked revision "
+                                            r"w:del id=106 by 'Reviewer B'"):
+        edit(doc, tmp_path / "out.docx", ["K1"], para=para, citation_id="cB")
+    alone = make_docx(tmp_path / "alone.docx", xml.replace(_field("cC", [_entry("K3")], ["(3)"]), ""))
+    with pytest.raises(RefusedUnsafe, match=r"citation cB has its field code deleted"):
+        edit(alone, tmp_path / "out.docx", ["K1"], para=para, current_text="(3)")
+    assert not (tmp_path / "out.docx").exists()
+    # The live citation that reads the same is still the one picked by its text.
+    edit(doc, tmp_path / "out.docx", ["K1"], para=para, current_text="(3)")
+    _, _, after = cluster_ops._clusters_of(tmp_path / "out.docx")
+    assert {c.citation_id: c.item_keys for c in after}["cC"] == ["K1"]
+    assert "cB" not in {c.citation_id for c in after}  # still a tracked deletion

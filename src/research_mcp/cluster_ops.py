@@ -48,9 +48,17 @@ class ZoteroField:
     result_t: list[Node] = field(default_factory=list)
     nested: list[str] = field(default_factory=list)
     del_instr: bool = False
+    del_code: list[Node] = field(default_factory=list)
+    del_result: list[Node] = field(default_factory=list)
 
     def instruction(self, xml: str) -> str:
         return "".join("" if node.closed else unescape(node.inner(xml)) for node in self.instr)
+
+    def deleted_instruction(self, xml: str) -> str:
+        """The field code with its tracked-deleted text (`w:delInstrText`) read too, in document order."""
+
+        nodes = sorted([*self.instr, *self.del_code], key=lambda node: node.start)
+        return "".join("" if node.closed else unescape(node.inner(xml)) for node in nodes)
 
     def rendered(self, xml: str) -> str:
         return "".join("" if node.closed else unescape(node.inner(xml)) for node in self.result_t)
@@ -110,13 +118,17 @@ def body_fields(xml: str, body: Node) -> list[ZoteroField]:
             stack[-1].instr.append(node)
         elif name == "w:delInstrText":
             stack[-1].del_instr = True
+            if stack[-1].separate is None:
+                stack[-1].del_code.append(node)
+        elif name == "w:delText" and stack[-1].separate is not None:
+            stack[-1].del_result.append(node)
         elif name == "w:t" and stack[-1].separate is not None:
             stack[-1].result_t.append(node)
     return done
 
 
-def _cluster(xml: str, item: ZoteroField) -> Cluster | None:
-    instruction = item.instruction(xml)
+def _cluster(xml: str, item: ZoteroField, deleted: bool = False) -> Cluster | None:
+    instruction = item.deleted_instruction(xml) if deleted else item.instruction(xml)
     if not instruction.strip().startswith(_ITEM_PREFIX) or item.separate is None or item.end is None:
         return None
     start = instruction.find("{")
@@ -136,7 +148,9 @@ def _cluster(xml: str, item: ZoteroField) -> Cluster | None:
         suffix=instruction[start + end:],
         citation_id=str(payload.get("citationID") or ""),
         item_keys=[item_key(entry) or "?" for entry in entries],
-        rendered=item.rendered(xml),
+        rendered="".join("" if node.closed else unescape(node.inner(xml)) for node in
+                         sorted([*item.result_t, *item.del_result], key=lambda node: node.start))
+        if deleted else item.rendered(xml),
     )
 
 
@@ -151,29 +165,64 @@ def clusters_in(xml: str, body: Node, span: tuple[int, int] | None = None) -> li
     return found
 
 
+def deleted_clusters_in(xml: str, body: Node, span: tuple[int, int] | None = None) -> list[Cluster]:
+    """Citations whose field code is (partly) tracked-deleted text, which `clusters_in` leaves out because their
+    `w:instrText` alone reads as no citation: read with their `w:delInstrText`, so a tool can name and refuse them
+    instead of skipping them."""
+
+    found = []
+    for item in body_fields(xml, body):
+        if not item.del_instr or (span is not None and not span[0] <= item.begin.start < span[1]):
+            continue
+        cluster = _cluster(xml, item, deleted=True)
+        if cluster is not None and _cluster(xml, item) is None:
+            found.append(cluster)
+    return found
+
+
+def deleted_zotero_fields(xml: str, body: Node) -> list[str]:
+    """Every Zotero field in `body` whose field code is tracked-deleted text, described with its revision."""
+
+    found = []
+    for item in body_fields(xml, body):
+        if not item.del_instr:
+            continue
+        instruction = item.deleted_instruction(xml).strip()
+        if not instruction.startswith("ADDIN ZOTERO_"):
+            continue
+        cluster = _cluster(xml, item, deleted=True)
+        name = (f"citation {cluster.citation_id} {cluster.rendered!r}" if cluster is not None
+                else "the bibliography" if instruction.startswith("ADDIN ZOTERO_BIBL") else instruction[:40])
+        wrapper = next((a for node in item.del_code for a in node.ancestors() if a.name in _WRAPPERS), None)
+        found.append(f"{name} in tracked revision {_describe(xml, wrapper)}" if wrapper is not None else name)
+    return found
+
+
 def _norm(text: str) -> str:
     return " ".join(text.split())
 
 
-def select_cluster(clusters: list[Cluster], paragraph_index: int, *, citation_id: str | None,
-                   current_text: str | None) -> Cluster:
-    if (citation_id is None) == (current_text is None):
-        raise RefusedUnsafe(f"{OP}: give exactly one of citation_id or current_text")
+def _matching(clusters: list[Cluster], citation_id: str | None, current_text: str | None) -> list[Cluster]:
     if citation_id is not None:
-        matches = [c for c in clusters if c.citation_id == citation_id]
-        wanted = f"citation_id {citation_id!r}"
-    else:
-        matches = [c for c in clusters if _norm(c.rendered) == _norm(current_text or "")]
-        wanted = f"current_text {current_text!r}"
+        return [c for c in clusters if c.citation_id == citation_id]
+    return [c for c in clusters if _norm(c.rendered) == _norm(current_text or "")]
+
+
+def select_cluster(clusters: list[Cluster], paragraph_index: int, *, citation_id: str | None,
+                   current_text: str | None, op: str = OP) -> Cluster:
+    if (citation_id is None) == (current_text is None):
+        raise RefusedUnsafe(f"{op}: give exactly one of citation_id or current_text")
+    matches = _matching(clusters, citation_id, current_text)
+    wanted = f"citation_id {citation_id!r}" if citation_id is not None else f"current_text {current_text!r}"
     if len(matches) == 1:
         return matches[0]
     listed = "; ".join(c.describe() for c in clusters) or "none"
     if not matches:
         raise RefusedUnsafe(
-            f"{OP}: no Zotero citation in paragraph {paragraph_index} matches {wanted}; "
+            f"{op}: no Zotero citation in paragraph {paragraph_index} matches {wanted}; "
             f"citations in that paragraph: {listed}")
     raise RefusedUnsafe(
-        f"{OP}: {len(matches)} Zotero citations in paragraph {paragraph_index} match {wanted}; "
+        f"{op}: {len(matches)} Zotero citations in paragraph {paragraph_index} match {wanted}; "
         f"pass citation_id instead. Candidates: {'; '.join(c.describe() for c in matches)}")
 
 
@@ -190,7 +239,10 @@ def refuse_unsafe_cluster(xml: str, body: Node, cluster: Cluster, op: str = OP) 
         raise RefusedUnsafe(
             f"{op}: citation {cluster.citation_id} contains a nested field ({item.nested[0]}); edit it in Word")
     if item.del_instr:
-        raise RefusedUnsafe(f"{op}: citation {cluster.citation_id} has deleted (tracked) field code text")
+        wrapper = next((a for node in item.del_code for a in node.ancestors() if a.name in _WRAPPERS), None)
+        where = f"tracked revision {_describe(xml, wrapper)}" if wrapper is not None else "a tracked deletion"
+        raise RefusedUnsafe(f"{op}: citation {cluster.citation_id} has its field code deleted in {where}; "
+                            "accept or reject it first (list_revisions shows it)")
     for node in [item.begin, item.separate, item.end, *item.instr, *item.result_t]:
         wrapper = next((a for a in node.ancestors() if a.name in _WRAPPERS), None)
         if wrapper is not None:
@@ -321,7 +373,12 @@ def edit_cluster_to_version(
 
     keys = [str(key).strip() for key in item_keys]
     if not keys:
-        raise RefusedUnsafe(f"{OP}: item_keys is empty; to delete a citation, edit the text instead")
+        # Plan 864 decision 18: a ready-to-copy op with the caller's own paragraph and selector.
+        selector = {"citation_id": citation_id} if citation_id else {"current_text": current_text}
+        ready = json.dumps({"type": "delete_citation", "paragraph_index": paragraph_index, **selector},
+                           ensure_ascii=False)
+        raise RefusedUnsafe(f"{OP}: item_keys is empty; to remove the whole citation use the edit_document op "
+                            f"delete_citation (a tracked deletion by default): {ready}")
     if any(not key for key in keys):
         raise RefusedUnsafe(f"{OP}: item_keys holds an empty key")
     duplicates = sorted({key for key in keys if keys.count(key) > 1})
@@ -350,8 +407,13 @@ def edit_cluster_to_version(
                 f"staged {source_audit.sha256.upper()}). Reinspect the document with inspect_document.")
         xml, doc, _ = _clusters_of(Path(staged))
         paragraph = doc.paragraph(int(paragraph_index), OP)
-        cluster = select_cluster(clusters_in(xml, doc.body, (paragraph.start, paragraph.end)),
-                                 int(paragraph_index), citation_id=citation_id, current_text=current_text)
+        span = (paragraph.start, paragraph.end)
+        live = clusters_in(xml, doc.body, span)
+        if (citation_id is None) != (current_text is None) and not _matching(live, citation_id, current_text):
+            # Plan 924 S2: a citation whose field code is a tracked deletion is named and refused, not "not found".
+            for gone in _matching(deleted_clusters_in(xml, doc.body, span), citation_id, current_text):
+                refuse_unsafe_cluster(xml, doc.body, gone)
+        cluster = select_cluster(live, int(paragraph_index), citation_id=citation_id, current_text=current_text)
         refuse_unsafe_cluster(xml, doc.body, cluster)
         payload, warnings = _new_payload(cluster, keys, zotero)
         new_xml = plan_xml_edit(xml, cluster, payload)

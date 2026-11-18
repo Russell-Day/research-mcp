@@ -33,6 +33,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, field
 import difflib
+import json
 from io import BytesIO
 from pathlib import Path
 import re
@@ -45,6 +46,8 @@ from .paragraphs import read_snapshot
 
 
 W14 = "{http://schemas.microsoft.com/office/word/2010/wordml}"
+W16CID = "{http://schemas.microsoft.com/office/word/2016/wordml/cid}"
+W15 = "{http://schemas.microsoft.com/office/word/2012/wordml}"
 XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 _RSID_ATTRS = {"rsidR", "rsidRPr", "rsidRDefault", "rsidP", "rsidDel", "rsidTr", "rsidSect", "rsidRDefault"}
 # cnfStyle caches which table-style conditions (first column, banding) apply; it
@@ -94,7 +97,12 @@ def _canon(element: ET.Element) -> None:
 
 
 def _mergeable(run: ET.Element) -> bool:
-    return all(child.tag in (W + "rPr", W + "t", W + "tab") for child in run)
+    # Line, page and carriage-return breaks are characters of the run like text and tabs (\v, \x0c): a run
+    # split around one ("a<br/>b" -> "a<br/>" + "b") reads, renders and saves the same as the unsplit run.
+    return all(child.tag in _RUN_TEXT_TAGS for child in run)
+
+
+_RUN_TEXT_TAGS = (W + "rPr", W + "t", W + "tab", W + "br", W + "cr")
 
 
 def _rpr_key(run: ET.Element) -> str:
@@ -203,6 +211,9 @@ class Layout:
     styles_outline: dict[str, int]
     body: ET.Element | None = None
     comment_keys: dict[str, tuple] = field(default_factory=dict)  # comment id -> (author, initials, text)
+    # comment w:id -> the comment_id delete_comment takes for its thread (the root's durable id or legacy:N; a
+    # reply maps to its root, since deleting a reply alone would leave the root's anchor in place)
+    comment_ids: dict[str, str] = field(default_factory=dict)
 
     def row_at_unit(self, position: int) -> Row | None:
         for rows in self.tables:
@@ -282,7 +293,9 @@ def _walk_paragraph(paragraph: ET.Element, style_caps: dict[str, bool], para_sty
     """Characters in `_paragraph_text` order with formatting context.
 
     Mirrors `paragraphs._paragraph_text` exactly (w:t, w:tab, w:br, w:cr at
-    any depth outside pPr) so offsets agree with every other tool.
+    any depth outside pPr; a tab or break inside a tracked deletion, `w:del`
+    or `w:moveFrom`, is not counted, as its deleted text is not) so offsets
+    agree with every other tool and give the accepted text.
     """
 
     text: list[str] = []
@@ -291,7 +304,7 @@ def _walk_paragraph(paragraph: ET.Element, style_caps: dict[str, bool], para_sty
     field_depth = [0]
     para_caps = style_caps.get(para_style or "", False)
 
-    def emit(node: ET.Element, rpr_key: str, run_caps: bool, context: str) -> None:
+    def emit(node: ET.Element, rpr_key: str, run_caps: bool, context: str, deleted: bool = False) -> None:
         for child in node:
             tag = child.tag
             if tag == W + "pPr":
@@ -302,7 +315,7 @@ def _walk_paragraph(paragraph: ET.Element, style_caps: dict[str, bool], para_sty
                 if direct is None:
                     style = rpr.find("w:rStyle", NS) if rpr is not None else None
                     direct = style_caps.get(style.get(W + "val"), False) if style is not None else para_caps
-                emit(child, canonical(rpr), bool(direct), context)
+                emit(child, canonical(rpr), bool(direct), context, deleted)
                 continue
             if tag == W + "rPr":
                 continue
@@ -314,6 +327,8 @@ def _walk_paragraph(paragraph: ET.Element, style_caps: dict[str, bool], para_sty
                     field_depth[0] = max(0, field_depth[0] - 1)
                 continue
             if tag in (W + "t", W + "tab", W + "br", W + "cr"):
+                if deleted and tag != W + "t":
+                    continue  # a deleted tab or break is gone from the accepted text, like w:delText
                 if tag == W + "t":
                     chunk = child.text or ""
                 elif tag == W + "tab":
@@ -327,7 +342,7 @@ def _walk_paragraph(paragraph: ET.Element, style_caps: dict[str, bool], para_sty
                     caps.append(run_caps)
                 continue
             extra = {W + "hyperlink": "h", W + "sdt": "s", W + "fldSimple": "f"}.get(tag, "")
-            emit(child, rpr_key, run_caps, context + extra)
+            emit(child, rpr_key, run_caps, context + extra, deleted or tag in _DELETED_WRAPPERS)
 
     emit(paragraph, "", para_caps, "")
     return "".join(text), tuple(fps), tuple(caps)
@@ -338,11 +353,37 @@ def read_layout(path: str | Path) -> Layout:
     with zipfile.ZipFile(BytesIO(snapshot.package)) as archive:
         root = ET.fromstring(archive.read("word/document.xml"))
         style_caps, style_levels = _styles(archive)
-        comment_keys = {}
-        if "word/comments.xml" in archive.namelist():
+        comment_keys, comment_ids = {}, {}
+        names = archive.namelist()
+        if "word/comments.xml" in names:
+            durable, parents = {}, {}
+            if "word/commentsIds.xml" in names:
+                for item in ET.fromstring(archive.read("word/commentsIds.xml")):
+                    if item.get(W16CID + "paraId") and item.get(W16CID + "durableId"):
+                        durable[item.get(W16CID + "paraId")] = item.get(W16CID + "durableId").upper()
+            if "word/commentsExtended.xml" in names:
+                for item in ET.fromstring(archive.read("word/commentsExtended.xml")):
+                    if item.get(W15 + "paraId") and item.get(W15 + "paraIdParent"):
+                        parents[item.get(W15 + "paraId")] = item.get(W15 + "paraIdParent")
+            by_para: dict[str, str] = {}
+            last_para: dict[str, str | None] = {}
             for comment in ET.fromstring(archive.read("word/comments.xml")).findall("w:comment", NS):
                 text = "".join(node.text or "" for node in comment.iter(W + "t"))
-                comment_keys[comment.get(W + "id")] = (comment.get(W + "author"), comment.get(W + "initials"), text)
+                mark_id = comment.get(W + "id")
+                comment_keys[mark_id] = (comment.get(W + "author"), comment.get(W + "initials"), text)
+                # The id inspect_document lists and delete_comment takes (`comments.py`): the durable id keyed by
+                # the paraId of the comment's last paragraph, else legacy:<w:id>.
+                para_id = next((item.get(W14 + "paraId") for item in reversed(comment.findall(".//w:p", NS))
+                                if item.get(W14 + "paraId")), None)
+                last_para[mark_id] = para_id
+                by_para[para_id or ""] = mark_id
+                comment_ids[mark_id] = durable.get(para_id or "", f"legacy:{mark_id}")
+            for mark_id, para_id in last_para.items():
+                seen = {para_id}
+                while para_id in parents and parents[para_id] in by_para and parents[para_id] not in seen:
+                    para_id = parents[para_id]
+                    seen.add(para_id)
+                comment_ids[mark_id] = comment_ids[by_para[para_id]] if para_id in by_para else comment_ids[mark_id]
     body = root.find("w:body", NS)
     paragraphs: list[Para] = []
     units: list[Unit] = []
@@ -412,7 +453,7 @@ def read_layout(path: str | Path) -> Layout:
                 tables.append(rows)
             else:
                 units.append(Unit("other", child))
-    return Layout(Path(path), paragraphs, units, tables, style_levels, body, comment_keys)
+    return Layout(Path(path), paragraphs, units, tables, style_levels, body, comment_keys, comment_ids)
 
 
 # --------------------------------------------------------------------------
@@ -1130,10 +1171,13 @@ def _plan_section_rows(layout: Layout, op: str, section: Section, new_rows: list
                 table_rows[old_rows[-1].row + 1] if old_rows[-1].row + 1 < len(table_rows) else None)
             _refuse_template_objects(layout, op, template)
             appended = False
+            # Copies placed above their own template (rows added before the section's first row) push it down:
+            # each later copy names the template where it now stands, not the copy made before it.
+            moved = 0
             for offset in reversed(range(j2 - j1 - paired)):
                 if following is not None:
                     insert_at = following.first_index
-                    plan.steps.append(DuplicateRowStep(template.first_index, following.first_index, None))
+                    plan.steps.append(DuplicateRowStep(template.first_index + moved, following.first_index, None))
                 elif not appended:
                     insert_at = table_rows[-1].end_index + 1
                     plan.steps.append(DuplicateRowStep(template.first_index, None, table_rows[-1].first_index))
@@ -1145,7 +1189,10 @@ def _plan_section_rows(layout: Layout, op: str, section: Section, new_rows: list
                 expected[j1 + paired + offset] = _plan_row(
                     plan, layout, op, template, new_rows[j1 + paired + offset], base_shift=shift,
                     label=f"new row {j1 + paired + offset + 1} of the section (copied from table row {template.row + 1})")
-                delta += _row_size(template) + _added_lines(expected[j1 + paired + offset], template)
+                grown = _row_size(template) + _added_lines(expected[j1 + paired + offset], template)
+                delta += grown
+                if following is template:
+                    moved += grown
         if i2 - i1 > paired:
             for row in reversed(old_rows[i1 + paired:i2]):
                 _refuse_template_objects(layout, op, row, verb="delete")
@@ -1177,26 +1224,42 @@ def _added_lines(unit: ExpUnit, row: Row) -> int:
 _OBJECTS = (("fldChar", "field"), ("fldSimple", "field"), ("sdt", "content control"),
             ("hyperlink", "hyperlink"), ("drawing", "drawing"), ("pict", "drawing"), ("object", "embedded object"),
             ("bookmarkStart", "bookmark"), ("commentRangeStart", "comment"), ("commentReference", "comment"),
-            ("ins", "tracked revision"), ("del", "tracked revision"), ("footnoteReference", "footnote"),
-            ("endnoteReference", "endnote"))
+            ("ins", "tracked revision"), ("del", "tracked revision"), ("moveFrom", "tracked revision"),
+            ("moveTo", "tracked revision"), ("footnoteReference", "footnote"), ("endnoteReference", "endnote"))
+_REVISION_TAGS = {"ins", "del", "moveFrom", "moveTo"}
 
 
-def _object_in(node: ET.Element | None) -> str | None:
+def _found_object(node: ET.Element | None) -> tuple[str, ET.Element] | None:
     if node is None:
         return None
     for tag, name in _OBJECTS:
         found = node.find(f".//w:{tag}", NS)
         if found is not None:
-            if tag == "bookmarkStart":
-                return f"bookmark {found.get(W + 'name')!r}"
-            return name
+            return tag, found
     return None
 
 
+def _object_in(node: ET.Element | None) -> str | None:
+    hit = _found_object(node)
+    if hit is None:
+        return None
+    tag, found = hit
+    if tag == "bookmarkStart":
+        return f"bookmark {found.get(W + 'name')!r}"
+    return dict(_OBJECTS)[tag]
+
+
 def _refuse_objects(node: ET.Element | None, op: str, action: str) -> None:
-    what = _object_in(node)
-    if what is not None:
-        raise RefusedUnsafe(f"{op}: would {action}, which holds a {what}; edit around it instead")
+    hit = _found_object(node)
+    if hit is None:
+        return
+    tag, found = hit
+    if tag in _REVISION_TAGS:
+        # Plan 864 S3a: a tracked revision is named (as revisions.describe_wrapper does) with the way forward.
+        raise RefusedUnsafe(
+            f"{op}: would {action}, which holds a tracked revision (w:{tag} id={found.get(W + 'id')} by "
+            f"{found.get(W + 'author')!r} ({found.get(W + 'date')})); accept or reject it first, then edit again")
+    raise RefusedUnsafe(f"{op}: would {action}, which holds a {_object_in(node)}; edit around it instead")
 
 
 def _refuse_template_objects(layout: Layout, op: str, row: Row, *, verb: str = "copy") -> None:
@@ -1239,6 +1302,7 @@ def _plan_section_paragraphs(layout: Layout, op: str, section: Section, new_line
 # bookmark appearing or going.
 
 _R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+_DELETED_WRAPPERS = {W + "del", W + "moveFrom"}  # tracked deletions: their tabs and breaks are not text
 _SKIP_SUBTREES = {W + "pPr", W + "rPr", W + "sdtPr", W + "tblPr", W + "trPr", W + "tcPr", W + "sectPr"}
 _WORD_OWN_BOOKMARKS = {"_GoBack"}
 
@@ -1417,7 +1481,9 @@ def baseline_preservation_errors(source: str | Path, baseline: str | Path) -> li
 #
 # * text inserted at a position lands inside a bookmark that starts there,
 #   outside a comment that starts there, and outside any bookmark or comment
-#   that ends there; a collapsed bookmark stays before it;
+#   that ends there; a collapsed bookmark stays before it, a point comment
+#   (zero-length range, then its reference) after it (plan 924, measured in
+#   Word 2026-11-17: typed with Track Changes on and inserted plainly alike);
 # * text that replaces characters belongs to the anchors that held them, so
 #   an anchor starting at or ending after the replaced characters covers the
 #   new text; a boundary strictly inside the replaced characters may land
@@ -1452,7 +1518,7 @@ def anchor_extents(layout: Layout) -> dict:
     cursor = [0]
     marks: list[tuple[str, str | None, str | None, int]] = []
 
-    def visit(node: ET.Element) -> None:
+    def visit(node: ET.Element, deleted: bool = False) -> None:
         tag = node.tag
         if tag in _SKIP_SUBTREES:
             return
@@ -1462,11 +1528,12 @@ def anchor_extents(layout: Layout) -> dict:
         elif tag == W + "t":
             cursor[0] += len(node.text or "")
         elif tag in (W + "tab", W + "br", W + "cr"):
-            cursor[0] += 1
+            cursor[0] += 0 if deleted else 1  # a deleted tab or break is not in the text (`_walk_paragraph`)
         elif tag in _ANCHOR_MARKS:
             marks.append((tag, node.get(W + "id"), node.get(W + "name"), cursor[0]))
+        deleted = deleted or tag in _DELETED_WRAPPERS
         for child in node:
-            visit(child)
+            visit(child, deleted)
         if index is not None:
             width = len(layout.para(index).text)
             if cursor[0] - starts[index - 1] != width:
@@ -1499,9 +1566,13 @@ def anchor_extents(layout: Layout) -> dict:
     for mark_id, seen in comments.items():
         start = seen.get("start", seen.get("reference", seen.get("end")))
         end = seen.get("end", seen.get("reference", start))
-        ranges.append((layout.comment_keys.get(mark_id, ("?", None, "")), start, end))
+        ranges.append((layout.comment_keys.get(mark_id, ("?", None, "")), start, end, mark_id,
+                       "start" in seen and "end" in seen))
     ranges.sort(key=lambda item: (item[1], item[2]))
-    return {"bookmarks": bookmarks, "comments": ranges}
+    # "comment_marks" is each range's comment w:id, and "comment_ranged" whether it has range markers (a
+    # reference-only comment has none), in the same order as "comments".
+    return {"bookmarks": bookmarks, "comments": [item[:3] for item in ranges],
+            "comment_marks": [item[3] for item in ranges], "comment_ranged": [item[4] for item in ranges]}
 
 
 @dataclass
@@ -1519,8 +1590,9 @@ def map_anchor_point(point: int, role: str, edit: StreamEdit) -> tuple[int, int]
 
     `role` says where the boundary ends up when text is inserted exactly at
     it: "before" the new text (a bookmark's start, so the bookmark takes it;
-    every end, so the anchor does not; both ends of a collapsed anchor) or
-    "after" it (a comment's start, so the comment does not take it).
+    every end, so the anchor does not; both ends of a collapsed bookmark) or
+    "after" it (a comment's start, so the comment does not take it; both ends
+    of a point comment, which Word types before).
     """
 
     at, removed, added = edit.position, edit.removed, edit.added
@@ -1605,10 +1677,15 @@ class _Expected:
     may_vanish: bool = False
 
 
-def _expect(start: int, end: int | None, start_role: str, edits: list[StreamEdit]) -> _Expected:
+def _expect(start: int, end: int | None, start_role: str, edits: list[StreamEdit],
+            collapsed_role: str = "before") -> _Expected:
+    """`collapsed_role`: the side of typed text both ends of a zero-length anchor keep ("before" for a
+    bookmark; "after" for a point comment, which Word types before; plan 924)."""
+
     end = start if end is None else end
+    end_role = "before"
     if start == end:
-        start_role = "before"  # a collapsed anchor stays before typed text
+        start_role = end_role = collapsed_role
     low_start = high_start = start
     low_end = high_end = end
     vanish = False
@@ -1619,9 +1696,15 @@ def _expect(start: int, end: int | None, start_role: str, edits: list[StreamEdit
             vanish = True  # every character of the anchor is deleted (a whole replaced span keeps it)
         low_start = map_anchor_point(low_start, start_role, edit)[0]
         high_start = map_anchor_point(high_start, start_role, edit)[1]
-        low_end = map_anchor_point(low_end, "before", edit)[0]
-        high_end = map_anchor_point(high_end, "before", edit)[1]
+        low_end = map_anchor_point(low_end, end_role, edit)[0]
+        high_end = map_anchor_point(high_end, end_role, edit)[1]
     return _Expected((low_start, high_start), (low_end, high_end), vanish)
+
+
+def _point_text(text: str, point: int, width: int = 15) -> str:
+    """A zero-length position shown with the text on either side: 'data team|. Built'."""
+
+    return repr(_span_text(text, max(0, point - width), point) + "|" + _span_text(text, point, point + width))
 
 
 def _span_text(text: str, start: int, end: int | None) -> str:
@@ -1650,17 +1733,26 @@ def anchor_errors_for_edits(before: Layout, after: Layout, edits: list[StreamEdi
     text, old_text = stream_text(after), stream_text(before)
     problems: list[str] = []
 
-    def check(label: str, original: tuple, wanted: _Expected, actual: tuple | None) -> None:
+    def check(label: str, original: tuple, wanted: _Expected, actual: tuple | None, fix: str = "") -> None:
         was = _span_text(old_text, original[0], original[1])
+        fix = fix or "remove or move it first, or keep some of its text"
         if actual is None:
             if wanted.may_vanish:
-                problems.append(f"{label} on {was!r} would be deleted because all of its text is deleted; "
-                                "remove or move it first, or keep some of its text")
+                problems.append(f"{label} on {was!r} would be deleted because all of its text is deleted; {fix}")
             else:
                 problems.append(f"{label} on {was!r} was lost")
             return
         start, end = actual[0], actual[1] if actual[1] is not None else actual[0]
+        if wanted.may_vanish and start == end and original[1] is not None and original[0] != original[1]:
+            # A tracked deletion keeps the markers, but after Accept they hold nothing (Word would drop them).
+            problems.append(f"{label} on {was!r} would be left empty because all of its text is deleted; {fix}")
+            return
         if wanted.start[0] <= start <= wanted.start[1] and wanted.end[0] <= end <= wanted.end[1]:
+            return
+        if start == end and wanted.start == wanted.end and wanted.start[0] == wanted.start[1]:
+            # A zero-length anchor: name the point by the text around it, not by its (empty) text.
+            problems.append(f"{label} would sit at {_point_text(text, start)} instead of "
+                            f"{_point_text(text, wanted.start[0])} (was {_point_text(old_text, original[0])})")
             return
         if wanted.start[0] == wanted.start[1] and wanted.end[0] == wanted.end[1]:
             should = repr(_span_text(text, wanted.start[0], wanted.end[0]))
@@ -1673,11 +1765,21 @@ def anchor_errors_for_edits(before: Layout, after: Layout, edits: list[StreamEdi
         check(f"bookmark {name!r}", extent, wanted, new["bookmarks"].get(name))
     for name in sorted(set(new["bookmarks"]) - set(old["bookmarks"])):
         problems.append(f"bookmark {name!r} appeared on {_span_text(text, *new['bookmarks'][name])!r}")
+    def comment_fix(mark_id: str | None) -> str:
+        """The way forward for a comment whose text is all deleted: its own thread's comment_id, as a ready op."""
+
+        if mark_id is None or mark_id not in before.comment_keys:
+            return ""
+        op = json.dumps({"type": "delete_comment", "comment_id": before.comment_ids.get(mark_id, f"legacy:{mark_id}")})
+        return f"delete_comment it in this batch, or keep some of its text (put {op} before this edit)"
+
     pending: dict[tuple, list] = {}
     for key, start, end in new["comments"]:
         pending.setdefault(key, []).append((start, end))
-    for key, start, end in old["comments"]:
-        wanted = _expect(start, end, "after", edits)
+    for (key, start, end), mark_id, ranged in zip(old["comments"], old["comment_marks"], old["comment_ranged"]):
+        # A point comment (range markers, no text between) stays after typed text, as Word types before it; a
+        # comment with only a reference keeps the reference before it.
+        wanted = _expect(start, end, "after", edits, collapsed_role="after" if ranged else "before")
         found = pending.get(key) or []
         actual = None
         for candidate in found:
@@ -1688,7 +1790,7 @@ def anchor_errors_for_edits(before: Layout, after: Layout, edits: list[StreamEdi
             actual = found[0]
         if actual is not None:
             found.remove(actual)
-        check(f"comment ({key[0]}: {key[2][:40]!r})", (start, end), wanted, actual)
+        check(f"comment ({key[0]}: {key[2][:40]!r})", (start, end), wanted, actual, comment_fix(mark_id))
     for key, found in pending.items():
         for start, end in found:
             problems.append(f"comment ({key[0]}: {key[2][:40]!r}) appeared on {_span_text(text, start, end)!r}")
@@ -1882,6 +1984,10 @@ def _short(fp: str | None) -> str:
     return f"[{' '.join(tags) or 'plain'}{' in ' + inside if inside else ''}]"
 
 
+def _row_deleted(row: Row) -> bool:
+    return row.node.find(f"{W}trPr/{W}del") is not None
+
+
 def consistency_errors(source: str | Path, candidate: str | Path) -> list[str]:
     """Batch-level D11 check over every table whose shape is unchanged.
 
@@ -1893,14 +1999,18 @@ def consistency_errors(source: str | Path, candidate: str | Path) -> list[str]:
 
     before, after = read_layout(source), read_layout(candidate)
     problems: list[str] = []
-    old_sig = [len(rows) for rows in before.tables]
-    new_sig = [len(rows) for rows in after.tables]
+    # A row tracked as deleted (w:del in its trPr) leaves the table once accepted: a tracked row deletion changes
+    # the row count as an untracked one does (plan 864 S3b), and such a row is never paired.
+    old_live = [[row for row in rows if not _row_deleted(row)] for rows in before.tables]
+    new_live = [[row for row in rows if not _row_deleted(row)] for rows in after.tables]
+    old_sig = [len(rows) for rows in old_live]
+    new_sig = [len(rows) for rows in new_live]
     matcher = difflib.SequenceMatcher(None, old_sig, new_sig, autojunk=False)
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag != "equal":
             continue
         for offset in range(i2 - i1):
-            old_rows, new_rows = before.tables[i1 + offset], after.tables[j1 + offset]
+            old_rows, new_rows = old_live[i1 + offset], new_live[j1 + offset]
             for old_row, new_row in zip(old_rows, new_rows):
                 where = f"table {j1 + offset + 1} row {new_row.row + 1}"
                 if len(old_row.cells) != len(new_row.cells):

@@ -419,6 +419,7 @@ def _server_factory(stop_after: int | None):
 
 def _run(argv, **kwargs):
     out, err = io.StringIO(), io.StringIO()
+    kwargs.setdefault("app_installed", lambda: False)  # not this PC's ChatGPT app
     code = remote.chatgpt_main(argv, out=out, err=err, clipboard=lambda url: True, poll=0.05, **kwargs)
     return code, out.getvalue(), err.getvalue()
 
@@ -437,6 +438,15 @@ def test_ctrl_c_stops_tunnel_and_server(fake_tunnel):
     assert commands[0][-2] == "--url" and commands[0][-1].startswith("http://127.0.0.1:")
     assert made[0].process.poll() is not None  # the tunnel process was stopped
     assert not http_made[0].thread.is_alive()
+
+
+def test_chatgpt_app_users_are_pointed_to_setup(fake_tunnel):
+    factory, _, _ = fake_tunnel
+    servers, _ = _server_factory(stop_after=3)
+    code, out, err = _run(["--read-only"], find=lambda: Path("cloudflared.exe"), tunnel_factory=factory("stay"),
+                          server_factory=servers, app_installed=lambda: True)
+    assert code == 0, err
+    assert out.startswith("The ChatGPT app can use research-mcp directly: run `research-mcp setup`.")
 
 
 def test_tunnel_dying_exits_nonzero(fake_tunnel):

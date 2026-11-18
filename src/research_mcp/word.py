@@ -88,7 +88,7 @@ def staged_document(source: str | Path, output: str | Path) -> Iterator[Path]:
                 except OSError:
                     pass
             raise
-        note_versioned(source_sha, output_path)
+        note_versioned(source_sha, output_path, source_path)
 
 
 def create_versioned_copy(source: str | Path, output: str | Path) -> tuple[Path, Path]:

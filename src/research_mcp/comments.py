@@ -78,7 +78,7 @@ def _anchor_data(
     exact: dict[str, bool] = {}
 
     def emit(paragraph: ET.Element, paragraph_index: int) -> None:
-        def walk(node: ET.Element) -> None:
+        def walk(node: ET.Element, deleted: bool = False) -> None:
             for child in node:
                 if child.tag == W + "pPr":
                     continue
@@ -104,6 +104,8 @@ def _anchor_data(
                     for legacy_id in active:
                         text.setdefault(legacy_id, []).append(value)
                     continue
+                if child.tag in (W + "tab", W + "br", W + "cr") and deleted:
+                    continue  # a tab or break inside a tracked deletion is not in the accepted text
                 if child.tag == W + "tab":
                     for legacy_id in active:
                         text.setdefault(legacy_id, []).append("\t")
@@ -116,7 +118,7 @@ def _anchor_data(
                 if child.tag in (W + "drawing", W + "pict", W + "object"):
                     for legacy_id in active:
                         exact[legacy_id] = False
-                walk(child)
+                walk(child, deleted or child.tag in (W + "del", W + "moveFrom"))
 
         walk(paragraph)
         # A comment that remains active after this paragraph spans its paragraph

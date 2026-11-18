@@ -30,6 +30,7 @@ def test_mcp_exports_only_narrow_tools():
         "insert_zotero_citation",
         "edit_citation_cluster",
         "refresh_citations",
+        "set_citation_style",
         "edit_document",
         "revert_document",
         "undo_document",
@@ -40,6 +41,9 @@ def test_mcp_exports_only_narrow_tools():
         "audit_document_style",
         "style_text",
         "render_document_pages",
+        "export_pdf",
+        "convert_document",
+        "edit_feedback",
     }
     assert "execute_com" not in names
     assert "delete_range" not in names
@@ -201,6 +205,7 @@ def test_stdio_protocol_handshake_and_tool_call(minimal_docx):
     assert "audit_document" in {tool.name for tool in tools.tools}
     assert "apply_document_style" in {tool.name for tool in tools.tools}
     assert "render_document_pages" in {tool.name for tool in tools.tools}
+    assert "export_pdf" in {tool.name for tool in tools.tools}
     assert not result.is_error
     assert result.structured_content["table_count"] >= 0
 
@@ -240,6 +245,7 @@ def test_modern_http_request_is_self_contained_and_sessionless():
         "insert_zotero_citation",
         "edit_citation_cluster",
         "refresh_citations",
+        "set_citation_style",
         "edit_document",
         "revert_document",
         "undo_document",
@@ -250,6 +256,9 @@ def test_modern_http_request_is_self_contained_and_sessionless():
         "audit_document_style",
         "style_text",
         "render_document_pages",
+        "export_pdf",
+        "convert_document",
+        "edit_feedback",
     }
 
 
@@ -356,3 +365,32 @@ def test_worker_payloads_use_staged_path_and_keyword_bookmark_names(monkeypatch,
     assert calls[0][1]["names"] == ["MCPFixtureLegacy"]
     assert calls[1][0] == "tables"
     assert calls[1][1]["specs"][0]["index"] == 1
+
+
+def test_add_zotero_item_by_doi_exposes_and_passes_create_collection(monkeypatch):
+    calls = []
+
+    def fake_add(**kwargs):
+        calls.append(kwargs)
+        return {
+            "success": True, "created": True, "item_key": "NEWKEY1", "doi": kwargs["doi"],
+            "title": "T", "first_author": "", "abstract": "", "pdf_attached": False,
+            "pdf_status": "not found", "visible_locally": True,
+            "collection": kwargs["collection"], "collection_marker_path": None,
+        }
+
+    monkeypatch.setattr("research_mcp.server.add_item_by_doi", fake_add)
+    tools = asyncio.run(server.list_tools())
+    schema = next(t for t in tools if t.name == "add_zotero_item_by_doi").input_schema
+    assert schema["properties"]["create_collection"].get("default") is False
+
+    result = asyncio.run(
+        server.call_tool(
+            "add_zotero_item_by_doi",
+            {"doi": "10.1000/x", "collection": "New Folder", "create_collection": True},
+        )
+    )
+    assert calls == [{
+        "doi": "10.1000/x", "path": None, "collection": "New Folder", "create_collection": True,
+    }]
+    assert result.structured_content["collection"] == "New Folder"

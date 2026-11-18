@@ -333,7 +333,14 @@ def main(argv: list[str] | None = None) -> int:
             finally:
                 connection.close()
     finally:
-        state_file.unlink(missing_ok=True)
+        # Remove the state only if this worker wrote it: a worker that lost a
+        # concurrent start (its Listener failed on the taken pipe) must not
+        # delete the state of the worker that won.
+        try:
+            if json.loads(state_file.read_text(encoding="utf-8")).get("pid") == os.getpid():
+                state_file.unlink(missing_ok=True)
+        except (OSError, ValueError, AttributeError):
+            pass
         if listener is not None:
             listener.close()
         if word is not None:

@@ -17,6 +17,8 @@ from typing import Any
 import xml.etree.ElementTree as ET
 import zipfile
 
+from .errors import RefusedUnsafe
+from .legacy_doc import is_legacy_doc, not_a_package
 from .ooxml import body_text, parse_table, top_level_prose_text
 
 NS = {
@@ -224,6 +226,8 @@ def _part_structure_errors(xml_text: str, part_name: str) -> list[str]:
 def document_structure_errors(path: str | Path) -> tuple[str, ...]:
     """Return deterministic OOXML preflight errors without starting Word."""
     resolved = Path(path).resolve(strict=True)
+    if is_legacy_doc(resolved):
+        return (f"package: {not_a_package(resolved)}",)
     errors: list[str] = []
     try:
         archive = zipfile.ZipFile(resolved)
@@ -264,6 +268,8 @@ def bookmark_references(root: ET.Element) -> dict[str, tuple[str, ...]]:
 
 def audit_docx(path: str | Path) -> Audit:
     resolved = Path(path).resolve(strict=True)
+    if is_legacy_doc(resolved):
+        raise RefusedUnsafe(not_a_package(resolved))
     with zipfile.ZipFile(resolved) as z:
         names = set(z.namelist())
         xml_text = z.read("word/document.xml").decode("utf-8")

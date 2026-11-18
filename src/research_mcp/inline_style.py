@@ -13,8 +13,8 @@ from typing import Any
 
 from .audit import audit_docx
 from . import style_audit
+from .edit_models import FIND_MAX
 from .editing import (
-    FIND_LIMIT,
     _field_spans,
     _refuse_field_overlap,
     _refuse_unsafe_candidate,
@@ -113,8 +113,9 @@ def _verify_protected(before, after) -> None:
 def _validate_request(paragraph_text: str, text: str, *, allow_whole_paragraph: bool) -> int:
     if not text:
         raise RefusedUnsafe("text must not be empty")
-    if len(text) > FIND_LIMIT:
-        raise RefusedUnsafe(f"text is {len(text)} characters; Word's search cannot exceed {FIND_LIMIT}")
+    if len(text) > FIND_MAX:
+        # Plan 864 decision 14: longer than Word Find's 255 is fine (locate_anchor checks the full text).
+        raise RefusedUnsafe(f"text is {len(text)} characters; at most {FIND_MAX} are supported")
     count = paragraph_text.count(text)
     if count != 1:
         raise RefusedUnsafe(f"text must occur exactly once in the paragraph; it occurs {count} times")

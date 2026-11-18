@@ -57,7 +57,7 @@ def test_locate_explicitly_sets_every_find_option():
     assert finder.MatchAllWordForms is False
 
 
-def test_locate_anchor_checks_word_resolved_text_and_find_limit():
+def test_locate_anchor_checks_word_resolved_text():
     finder = _Find()
     target = SimpleNamespace(Find=finder, Text="literal")
     document = SimpleNamespace(Paragraphs=lambda _: SimpleNamespace(Range=target))
@@ -67,9 +67,7 @@ def test_locate_anchor_checks_word_resolved_text_and_find_limit():
     target.Text = "different"
     with pytest.raises(RefusedUnsafe, match="resolved range does not hold"):
         locate_anchor(document, 1, "literal")
-
-    with pytest.raises(RefusedUnsafe, match="cannot exceed 255"):
-        locate_anchor(document, 1, "x" * 256)
+    # Finds longer than Word's 255 characters: tests/test_long_find.py (plan 864 decision 14).
 
 
 def test_crossing_a_comment_boundary_is_refused_but_containment_is_allowed():
@@ -311,3 +309,67 @@ def test_body_paragraph_insertion_leaving_tables_alone_is_accepted():
     saved = [SimpleNamespace(in_table=False, text="Prose.")]
     audit = _audit_with_tables(("a", "b"))
     _refuse_table_damage(saved, 1, audit, audit)
+
+
+class _RecordingRange:
+    def __init__(self, calls):
+        self.calls, self.End = calls, 10
+
+    @property
+    def Duplicate(self):
+        return self
+
+    def Collapse(self, direction):
+        self.calls.append(("Collapse", direction, self.End))
+
+    def InsertParagraphAfter(self):
+        self.calls.append(("InsertParagraphAfter",))
+
+
+def test_insert_paragraph_after_body_collapses_before_inserting():
+    """A range that spans an inline picture makes InsertParagraphAfter raise "Cannot edit Range"
+    (chk_491c77499c7a4237); the range is collapsed to just before the paragraph mark first."""
+    from research_mcp.editing import _WD_COLLAPSE_END, _insert_paragraph_after_body
+
+    calls: list = []
+    rng = _RecordingRange(calls)
+    _insert_paragraph_after_body(SimpleNamespace(Paragraphs=lambda _: SimpleNamespace(Range=rng)), 3)
+    assert calls == [("Collapse", _WD_COLLAPSE_END, 9), ("InsertParagraphAfter",)]
+
+
+def _png(path: Path) -> Path:
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    raw = b"".join(b"\x00" + b"\xff\x00\x00" * 8 for _ in range(8))
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 8, 8, 8, 2, 0, 0, 0))
+                     + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+    return path
+
+
+@pytest.mark.word_live
+@WORD_LIVE
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Word")
+def test_live_insert_paragraph_after_a_picture_only_paragraph(tmp_path):
+    """chk_491c77499c7a4237: BIOINF 527 PS2 refused with Word's raw "Cannot edit Range"."""
+    import docx
+
+    fixture = tmp_path / "picture.docx"
+    document = docx.Document()
+    document.add_paragraph("Question text.")
+    document.add_picture(str(_png(tmp_path / "dot.png")))
+    document.add_paragraph("Next question.")
+    document.save(fixture)
+    paragraphs = read_paragraphs(fixture)
+    assert paragraphs[1].text_exact is False, "paragraph 2 must hold only the picture"
+
+    result = insert_paragraph_to_version(
+        fixture, tmp_path / "out.docx", after_paragraph_index=2, text="Answer below the figure.")
+    saved = read_paragraphs(result["output"])
+    assert [p.text for p in saved] == ["Question text.", paragraphs[1].text, "Answer below the figure.",
+                                       "Next question."]
+    assert saved[1].text_exact is False  # the picture stayed in its own paragraph
+    assert audit_docx(result["output"]).drawing_count == audit_docx(fixture).drawing_count == 1

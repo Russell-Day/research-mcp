@@ -33,6 +33,15 @@ returns `sha256_after`; use it for the next write.
 - Undo refuses when someone changed the file outside the tools. Tell the user; `output=<new path>`
   writes the earlier state as a separate file without touching theirs.
 
+## 3b. Learn from what the user kept
+
+- Results carry an `edit_feedback` line when the user has accepted, rejected or reworded your earlier edits
+  since you last looked. Before editing that document again, call `edit_feedback(path)`: up to 10 new
+  outcomes, newest first, each "first proposal -> what the user kept". Follow their rewordings; do not
+  propose rejected text again.
+- More only when needed: `scope="all", query="..."` searches every document; `record_id=..., detail="rounds"`
+  shows each round of one span.
+
 ## 4. Make the edit
 
 - Batches in `edit_document` are all-or-nothing. Group the operations that belong together (one entry's
@@ -47,6 +56,8 @@ returns `sha256_after`; use it for the next write.
 - Bold or italic one phrase with `style_text` (preview first). Never restyle a whole paragraph for a
   phrase. `audit_document_style` shows emphasis and typography before you change it.
 - Check layout with `render_document_pages` (PNG pages) after table, figure or style changes.
+- Save a PDF to look at or hand in with `export_pdf` (beside the .docx as `<name>.pdf`, or `output`). It refuses
+  an existing file rather than overwrite it; tracked changes appear accepted and comments are hidden.
 
 ## 5. Citations go through Zotero
 

@@ -8,8 +8,9 @@ Windows PowerShell's ``>`` writes); an unreadable file counts as missing.
 
 Known keys: ``ZOTERO_API_KEY``, ``ZOTERO_LIBRARY_ID``, ``ZOTERO_LIBRARY_TYPE``, ``ZOTERO_MCP_CONTACT_EMAIL``,
 ``RESEARCH_MCP_AUTHOR``, ``RESEARCH_MCP_AUTHOR_INITIALS``, ``RESEARCH_MCP_ISSUES`` (``github``, the default, or
-``agent``), ``RESEARCH_MCP_ISSUES_FILE_WITH`` (the filing steps returned in ``agent`` mode), plus the technical
-``RESEARCH_MCP_*`` toggles.
+``agent``), ``RESEARCH_MCP_ISSUES_FILE_WITH`` (the filing steps returned in ``agent`` mode),
+``RESEARCH_MCP_FEEDBACK_DIR`` (the edit-feedback folder, plan 829; default ``~/research_mcp/edit_feedback``,
+refused inside OneDrive), plus the technical ``RESEARCH_MCP_*`` toggles.
 """
 
 from __future__ import annotations
